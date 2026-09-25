@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: deploymind
+      POSTGRES_PASSWORD: deploymind
+      POSTGRES_DB: deploymind
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deploymind -d deploymind"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://deploymind:deploymind@db:5432/deploymind
+      CORS_ORIGINS: http://localhost:5173,http://localhost:3000,http://localhost
+      KIND_CLUSTER_NAME: deploymind
+      K8S_NAMESPACE: deploymind
+    volumes:
+      - ./backend/app:/app/app
+      - workspace:/tmp/deploymind
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${USERPROFILE}/.kube:/host-kube:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  workspace:

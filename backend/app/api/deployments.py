@@ -1,0 +1,291 @@
+import logging
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+
+from app.agents.deployment_agent import (
+    deploy_green as run_production_green,
+    deploy_staging as run_staging,
+    rollback as run_rollback,
+    switch_traffic as run_switch_traffic,
+)
+from app.agents.kubernetes_agent import sanitize_name
+from app.api.schemas import DeploymentOut
+from app.core.config import settings
+from app.db.database import SessionLocal, get_db
+from app.db.models import Analysis, Deployment, GeneratedFile, Project
+from app.services.pipeline import upsert_step
+from app.services.repository_ai import analyze_deployment_failure
+
+router = APIRouter(prefix="/api/projects", tags=["deployments"])
+logger = logging.getLogger("deploymind")
+
+
+def _get_project(project_id: int, db: Session) -> Project:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+def _fail(step: str, message: str, details: str | None = None, status_code: int = 400):
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": "failed", "step": step, "message": message, "details": details},
+    )
+
+
+def _bg_deploy_staging(project_id: int):
+    db = SessionLocal()
+    project = None
+    try:
+        project = db.get(Project, project_id)
+        if not project:
+            return
+        analysis = db.query(Analysis).filter(Analysis.project_id == project_id).first()
+        files = {
+            f.filename: f.content
+            for f in db.query(GeneratedFile).filter(GeneratedFile.project_id == project_id).all()
+        }
+        dockerfile = files.get("Dockerfile", "")
+        k8s_files = {k: v for k, v in files.items() if k != "Dockerfile"}
+
+        result = run_staging(
+            project_id=project_id,
+            repository_url=project.repository_url,
+            repository_name=project.repository_name,
+            analysis=analysis.analysis_result or {} if analysis else {},
+            dockerfile=dockerfile,
+            k8s_files=k8s_files,
+        )
+
+        row = Deployment(
+            project_id=project_id,
+            environment="staging",
+            version="blue",
+            status=result.status,
+            deployment_type="staging",
+            details=result.model_dump(),
+        )
+        db.add(row)
+        project.status = "staging_healthy"
+        upsert_step(db, project_id, "Staging", "completed", result=result.message)
+        db.commit()
+    except Exception as exc:
+        logger.exception("staging background deploy failed")
+        msg = str(exc)
+        upsert_step(db, project_id, "Staging", "failed", error=msg)
+        project = db.get(Project, project_id)
+        if project:
+            failure_analysis = analyze_deployment_failure(
+                sanitize_name(project.repository_name or "app"),
+                settings.k8s_namespace,
+                msg,
+            )
+            project.status = "staging_failed"
+            db.add(
+                Deployment(
+                    project_id=project_id,
+                    environment="staging",
+                    version="blue",
+                    status="failed",
+                    deployment_type="staging",
+                    details={"error": msg, "failure_analysis": failure_analysis},
+                )
+            )
+            db.commit()
+    finally:
+        db.close()
+
+
+def _bg_deploy_production(project_id: int):
+    db = SessionLocal()
+    project = None
+    try:
+        project = db.get(Project, project_id)
+        if not project:
+            return
+        analysis = db.query(Analysis).filter(Analysis.project_id == project_id).first()
+        files = {
+            f.filename: f.content
+            for f in db.query(GeneratedFile).filter(GeneratedFile.project_id == project_id).all()
+        }
+        dockerfile = files.get("Dockerfile", "")
+        k8s_files = {k: v for k, v in files.items() if k != "Dockerfile"}
+
+        result = run_production_green(
+            project_id=project_id,
+            repository_url=project.repository_url,
+            repository_name=project.repository_name,
+            analysis=analysis.analysis_result or {} if analysis else {},
+            dockerfile=dockerfile,
+            k8s_files=k8s_files,
+        )
+
+        row = Deployment(
+            project_id=project_id,
+            environment="production",
+            version="green",
+            status="awaiting_approval",
+            deployment_type="production_green",
+            details=result.model_dump(),
+        )
+        db.add(row)
+        project.status = "production_awaiting_approval"
+        upsert_step(db, project_id, "Production", "running", result="GREEN version deployed and healthy; awaiting approval")
+        db.commit()
+    except Exception as exc:
+        logger.exception("production background deploy failed")
+        msg = str(exc)
+        upsert_step(db, project_id, "Production", "failed", error=msg)
+        project = db.get(Project, project_id)
+        if project:
+            failure_analysis = analyze_deployment_failure(
+                sanitize_name(project.repository_name or "app"),
+                settings.k8s_namespace,
+                msg,
+            )
+            project.status = "production_failed"
+            db.add(
+                Deployment(
+                    project_id=project_id,
+                    environment="production",
+                    version="green",
+                    status="failed",
+                    deployment_type="production_green",
+                    details={"error": msg, "failure_analysis": failure_analysis},
+                )
+            )
+            db.commit()
+    finally:
+        db.close()
+
+
+@router.post("/{project_id}/deploy/staging", status_code=202)
+def deploy_staging(project_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    project = _get_project(project_id, db)
+    analysis = db.query(Analysis).filter(Analysis.project_id == project_id).first()
+    if not analysis:
+        return _fail("staging", "Run analysis before deploying")
+
+    files = {
+        f.filename: f.content
+        for f in db.query(GeneratedFile).filter(GeneratedFile.project_id == project_id).all()
+    }
+    dockerfile = files.get("Dockerfile", "")
+    k8s_files = {k: v for k, v in files.items() if k != "Dockerfile"}
+    if not dockerfile or not k8s_files:
+        return _fail("staging", "Generated Dockerfile/Kubernetes files are missing")
+
+    upsert_step(db, project_id, "Staging", "running")
+    project.status = "deploying"
+    db.commit()
+
+    background_tasks.add_task(_bg_deploy_staging, project_id)
+    return {"status": "deploying", "message": "Staging deployment started in background"}
+
+
+@router.post("/{project_id}/deploy/production", status_code=202)
+def deploy_production(project_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    project = _get_project(project_id, db)
+    analysis = db.query(Analysis).filter(Analysis.project_id == project_id).first()
+    if not analysis:
+        return _fail("production", "Run analysis before deploying")
+
+    files = {
+        f.filename: f.content
+        for f in db.query(GeneratedFile).filter(GeneratedFile.project_id == project_id).all()
+    }
+    dockerfile = files.get("Dockerfile", "")
+    k8s_files = {k: v for k, v in files.items() if k != "Dockerfile"}
+    if not dockerfile or not k8s_files:
+        return _fail("production", "Generated Dockerfile/Kubernetes files are missing")
+
+    upsert_step(db, project_id, "Production", "running")
+    project.status = "deploying_green"
+    db.commit()
+
+    background_tasks.add_task(_bg_deploy_production, project_id)
+    return {"status": "deploying_green", "message": "Production GREEN deployment started in background"}
+
+
+
+@router.post("/{project_id}/deploy/production/approve")
+def approve_production(project_id: int, db: Session = Depends(get_db)):
+    project = _get_project(project_id, db)
+    app_name = sanitize_name(project.repository_name or "app")
+
+    try:
+        res = run_switch_traffic(app_name)
+        row = Deployment(
+            project_id=project_id,
+            environment="production",
+            version="green",
+            status="healthy",
+            deployment_type="traffic_switch",
+            details=res,
+        )
+        db.add(row)
+        project.status = "production_healthy"
+        db.commit()
+        db.refresh(row)
+
+        upsert_step(db, project_id, "Production", "completed", result="Traffic switched to GREEN")
+        upsert_step(db, project_id, "Completed", "completed", result="Production active on GREEN")
+        return {
+            "status": "healthy",
+            "message": "Production approved. Live traffic routed to GREEN.",
+            "deployment": DeploymentOut.model_validate(row).model_dump(mode="json"),
+        }
+    except Exception as exc:
+        logger.exception("approve production failed")
+        msg = str(exc)
+        upsert_step(db, project_id, "Production", "failed", error=msg)
+        return _fail("production_approval", "Failed to switch traffic to GREEN", msg, status_code=500)
+
+
+@router.post("/{project_id}/rollback")
+def rollback(project_id: int, db: Session = Depends(get_db)):
+    project = _get_project(project_id, db)
+    app_name = sanitize_name(project.repository_name or "app")
+
+    try:
+        res = run_rollback(app_name)
+        row = Deployment(
+            project_id=project_id,
+            environment="production",
+            version="blue",
+            status="rolled_back",
+            deployment_type="rollback",
+            details=res,
+        )
+        db.add(row)
+        project.status = "rolled_back"
+        db.commit()
+        db.refresh(row)
+
+        upsert_step(db, project_id, "Production", "warning", result="Rolled back traffic to BLUE")
+        upsert_step(db, project_id, "Completed", "warning", result="Rolled back to BLUE version")
+        return {
+            "status": "rolled_back",
+            "message": "Rollback complete. Live traffic switched back to BLUE.",
+            "deployment": DeploymentOut.model_validate(row).model_dump(mode="json"),
+        }
+    except Exception as exc:
+        logger.exception("rollback failed")
+        msg = str(exc)
+        upsert_step(db, project_id, "Production", "failed", error=msg)
+        return _fail("rollback", "Rollback failed", msg, status_code=500)
+
+
+@router.get("/{project_id}/deployments", response_model=list[DeploymentOut])
+def list_deployments(project_id: int, db: Session = Depends(get_db)):
+    _get_project(project_id, db)
+    return (
+        db.query(Deployment)
+        .filter(Deployment.project_id == project_id)
+        .order_by(Deployment.created_at.desc())
+        .all()
+    )
+
