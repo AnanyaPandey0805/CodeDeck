@@ -1,52 +1,85 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import {
-  approveProduction,
-  askRepositoryQuestion,
-  createProject,
-  deployProduction,
-  deployStaging,
-  getEvaluation,
-  getAnalysis,
-  getFiles,
-  getHealth,
-  getPipeline,
-  getProject,
-  listDeployments,
-  listProjects,
-  runAiTests,
-  rollbackProduction,
+  approveProduction, askRepositoryQuestion, createProject,
+  deployProduction, deployStaging, getAnalysis, getEvaluation,
+  getFiles, getHealth, getPipeline, getProject, getSystemStatus,
+  listDeployments, listProjects, rollbackProduction, runAiTests,
   startAnalysis,
-  type Analysis,
-  type Evaluation,
-  type GeneratedTestRun,
-  type Deployment,
-  type GeneratedFile,
-  type PipelineStep,
-  type Project,
-  type RepositoryAnswer,
+  type Analysis, type Deployment, type Evaluation, type GeneratedFile,
+  type GeneratedTestRun, type PipelineStep, type Project,
+  type RepositoryAnswer, type SystemStatus,
 } from './api'
 
-const DEFAULT_STEPS = [
-  'Repository Analysis',
-  'Repository Intelligence',
-  'Tests',
-  'Security',
-  'Docker',
-  'Kubernetes',
-  'Staging',
-  'Production',
-  'Completed',
+// ─── helpers ───────────────────────────────────────────────────────────────
+
+type Page = 'overview' | 'repository' | 'assistant' | 'intelligence' | 'testing' | 'docker' | 'kubernetes' | 'logs' | 'settings'
+
+const PIPELINE_STEPS = [
+  'Repository Analysis', 'Repository Intelligence', 'Tests',
+  'Security', 'Docker', 'Kubernetes', 'Staging',
 ]
 
-function stepIcon(status: string) {
-  if (status === 'completed') return '✓'
-  if (status === 'warning') return '⚠'
-  if (status === 'failed') return '✗'
-  if (status === 'running') return '●'
+function statusColor(s: string) {
+  if (s === 'completed') return 'text-emerald-400'
+  if (s === 'failed') return 'text-red-400'
+  if (s === 'running') return 'text-yellow-400'
+  if (s === 'warning') return 'text-orange-400'
+  return 'text-zinc-500'
+}
+function statusBg(s: string) {
+  if (s === 'completed') return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+  if (s === 'failed') return 'bg-red-500/10 text-red-400 border-red-500/20'
+  if (s === 'running') return 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20'
+  if (s === 'warning') return 'bg-orange-500/10 text-orange-400 border-orange-500/20'
+  return 'bg-zinc-800 text-zinc-500 border-zinc-700'
+}
+function stepIcon(s: string) {
+  if (s === 'completed') return '✓'
+  if (s === 'failed') return '✗'
+  if (s === 'running') return '●'
+  if (s === 'warning') return '⚠'
   return '○'
 }
 
+// ─── sub-components ─────────────────────────────────────────────────────────
+
+function Pill({ label, value }: { label: string; value: string | number | null | undefined }) {
+  return (
+    <div className="rounded border border-zinc-700 bg-zinc-800/60 px-3 py-2">
+      <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">{label}</div>
+      <div className="mt-0.5 truncate font-mono text-sm text-zinc-200">{value ?? '—'}</div>
+    </div>
+  )
+}
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <h2 className="mb-4 flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-zinc-500">
+      <span className="h-px flex-1 bg-zinc-800" />
+      {children}
+      <span className="h-px flex-1 bg-zinc-800" />
+    </h2>
+  )
+}
+
+function TerminalBlock({ text, maxH = '14rem' }: { text: string; maxH?: string }) {
+  const ref = useRef<HTMLPreElement>(null)
+  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight }, [text])
+  return (
+    <pre
+      ref={ref}
+      style={{ maxHeight: maxH }}
+      className="overflow-auto rounded border border-zinc-700 bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-300"
+    >
+      {text || <span className="text-zinc-600">No output</span>}
+    </pre>
+  )
+}
+
+// ─── main App ───────────────────────────────────────────────────────────────
+
 export default function App() {
+  const [page, setPage] = useState<Page>('overview')
   const [url, setUrl] = useState('')
   const [projects, setProjects] = useState<Project[]>([])
   const [selected, setSelected] = useState<Project | null>(null)
@@ -55,59 +88,52 @@ export default function App() {
   const [files, setFiles] = useState<GeneratedFile[]>([])
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [deployments, setDeployments] = useState<Deployment[]>([])
+  const [qaResult, setQaResult] = useState<RepositoryAnswer | null>(null)
+  const [question, setQuestion] = useState('What framework does this project use?')
+  const [evaluation, setEvaluation] = useState<Evaluation | null>(null)
+  const [aiTests, setAiTests] = useState<GeneratedTestRun | null>(null)
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null)
+  const [apiOk, setApiOk] = useState<boolean | null>(null)
+  const [busy, setBusy] = useState(false)
   const [deploying, setDeploying] = useState(false)
   const [deployingProd, setDeployingProd] = useState(false)
   const [approvingProd, setApprovingProd] = useState(false)
   const [rollingBack, setRollingBack] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [apiOk, setApiOk] = useState<boolean | null>(null)
-  const [question, setQuestion] = useState('What framework does this repository use?')
-  const [qaResult, setQaResult] = useState<RepositoryAnswer | null>(null)
   const [askingQuestion, setAskingQuestion] = useState(false)
-  const [evaluation, setEvaluation] = useState<Evaluation | null>(null)
-  const [loadingEvaluation, setLoadingEvaluation] = useState(false)
-  const [aiTests, setAiTests] = useState<GeneratedTestRun | null>(null)
   const [runningAiTests, setRunningAiTests] = useState(false)
+  const [loadingEval, setLoadingEval] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [logs, setLogs] = useState<Array<{ tag: string; text: string; ts: string }>>([])
 
+  const log = (tag: string, text: string) =>
+    setLogs(p => [...p.slice(-500), { tag, text, ts: new Date().toLocaleTimeString() }])
+
+  // On mount
   useEffect(() => {
-    getHealth()
-      .then(() => setApiOk(true))
-      .catch(() => setApiOk(false))
-    listProjects()
-      .then(setProjects)
-      .catch(() => setProjects([]))
+    getHealth().then(() => setApiOk(true)).catch(() => setApiOk(false))
+    listProjects().then(setProjects).catch(() => setProjects([]))
+    getSystemStatus().then(setSystemStatus).catch(() => setSystemStatus(null))
   }, [])
 
+  // Poll while busy
   useEffect(() => {
     if (!selected) return
-    const isBusy =
-      selected.status === 'deploying' ||
-      selected.status === 'deploying_green' ||
-      selected.status === 'analyzing' ||
-      pipeline.some((s) => s.status === 'running')
-
+    const isBusy = selected.status === 'deploying' || selected.status === 'deploying_green' || selected.status === 'analyzing'
     if (!isBusy) return
+    const iv = setInterval(() => loadProject(selected).catch(() => undefined), 3000)
+    return () => clearInterval(iv)
+  }, [selected?.id, selected?.status])
 
-    const interval = setInterval(() => {
-      loadProject(selected).catch(() => undefined)
-    }, 3000)
-
-    return () => clearInterval(interval)
-  }, [selected?.id, selected?.status, pipeline])
-
+  // Sync sub-results from analysis_result
   useEffect(() => {
-    const next = (analysis?.analysis_result ?? {}) as Record<string, unknown>
-    setEvaluation((next.evaluation_result as Evaluation | undefined) ?? null)
-    setAiTests((next.ai_test_result as GeneratedTestRun | undefined) ?? null)
+    const extra = (analysis?.analysis_result ?? {}) as Record<string, unknown>
+    setEvaluation((extra.evaluation_result as Evaluation | undefined) ?? null)
+    setAiTests((extra.ai_test_result as GeneratedTestRun | undefined) ?? null)
     setQaResult(null)
   }, [selected?.id, analysis?.created_at])
 
-
-  async function loadProject(project: Project, isManualSelect = false) {
-    if (isManualSelect) {
-      setError(null)
-    }
+  async function loadProject(project: Project, isManual = false) {
+    if (isManual) setError(null)
     setSelected(project)
     const [a, steps, fresh, generated, deps] = await Promise.all([
       getAnalysis(project.id),
@@ -120,44 +146,84 @@ export default function App() {
     setPipeline(steps)
     setSelected(fresh)
     setFiles(generated)
-    setSelectedFile((prev) => {
+    setSelectedFile(prev => {
       if (!prev) return generated[0]?.filename ?? null
-      if (!generated.some((f) => f.filename === prev)) return generated[0]?.filename ?? null
-      return prev
+      return generated.some(f => f.filename === prev) ? prev : generated[0]?.filename ?? null
     })
     setDeployments(deps)
-    setProjects((prev) => prev.map((p) => (p.id === fresh.id ? fresh : p)))
+    setProjects(prev => prev.map(p => p.id === fresh.id ? fresh : p))
   }
 
   async function onAnalyze(e: FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError(null)
+    log('Analysis', `Starting analysis for ${url}`)
     try {
       const project = await createProject(url.trim())
       setSelected(project)
-      setProjects((prev) => [project, ...prev.filter((p) => p.id !== project.id)])
+      setProjects(prev => [project, ...prev.filter(p => p.id !== project.id)])
+      log('Analysis', 'Repository cloned — running pipeline…')
       const result = await startAnalysis(project.id)
       setAnalysis(result)
       const [steps, fresh, generated, deps] = await Promise.all([
-        getPipeline(project.id),
-        getProject(project.id),
-        getFiles(project.id),
-        listDeployments(project.id),
+        getPipeline(project.id), getProject(project.id),
+        getFiles(project.id), listDeployments(project.id),
       ])
       setPipeline(steps)
       setSelected(fresh)
       setFiles(generated)
       setSelectedFile(generated[0]?.filename ?? null)
       setDeployments(deps)
-      setProjects((prev) => prev.map((p) => (p.id === fresh.id ? fresh : p)))
+      setProjects(prev => prev.map(p => p.id === fresh.id ? fresh : p))
+      log('Analysis', `Done — ${result.language} / ${result.framework}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong')
-      if (selected) {
-        getPipeline(selected.id).then(setPipeline).catch(() => undefined)
-      }
+      const msg = err instanceof Error ? err.message : 'Analysis failed'
+      setError(msg)
+      log('Analysis', `ERROR: ${msg}`)
+      if (selected) getPipeline(selected.id).then(setPipeline).catch(() => undefined)
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function onAsk(e: FormEvent) {
+    e.preventDefault()
+    if (!selected || !question.trim()) return
+    setAskingQuestion(true)
+    setError(null)
+    log('Q&A', `Question: ${question}`)
+    try {
+      const result = await askRepositoryQuestion(selected.id, question.trim())
+      setQaResult(result)
+      log('Q&A', `Answer received (${result.sources.length} sources)`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Q&A failed'
+      setError(msg)
+      log('Q&A', `ERROR: ${msg}`)
+    } finally {
+      setAskingQuestion(false)
+    }
+  }
+
+  async function onRunAiTests() {
+    if (!selected) return
+    setRunningAiTests(true)
+    setError(null)
+    log('Testing', 'Running AI-generated tests…')
+    try {
+      const result = await runAiTests(selected.id)
+      setAiTests(result)
+      const [latest, steps] = await Promise.all([getAnalysis(selected.id), getPipeline(selected.id)])
+      setAnalysis(latest)
+      setPipeline(steps)
+      log('Testing', `AI tests ${result.status}: ${result.message}`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'AI tests failed'
+      setError(msg)
+      log('Testing', `ERROR: ${msg}`)
+    } finally {
+      setRunningAiTests(false)
     }
   }
 
@@ -165,75 +231,55 @@ export default function App() {
     if (!selected) return
     setDeploying(true)
     setError(null)
+    log('Docker/K8s', 'Starting staging deployment…')
     try {
-      const result = await deployStaging(selected.id)
+      await deployStaging(selected.id)
       const [steps, fresh, deps] = await Promise.all([
-        getPipeline(selected.id),
-        getProject(selected.id),
-        listDeployments(selected.id),
+        getPipeline(selected.id), getProject(selected.id), listDeployments(selected.id),
       ])
       setPipeline(steps)
       setSelected(fresh)
       setDeployments(deps)
-      setProjects((prev) => prev.map((p) => (p.id === fresh.id ? fresh : p)))
-      if (result.status === 'failed') {
-        setError(result.message)
-      }
+      setProjects(prev => prev.map(p => p.id === fresh.id ? fresh : p))
+      log('Docker/K8s', 'Staging deployment initiated (running in background)')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Deploy failed')
-      getPipeline(selected.id).then(setPipeline).catch(() => undefined)
+      const msg = err instanceof Error ? err.message : 'Deploy failed'
+      setError(msg)
+      log('Docker/K8s', `ERROR: ${msg}`)
+      if (selected) getPipeline(selected.id).then(setPipeline).catch(() => undefined)
     } finally {
       setDeploying(false)
     }
   }
 
-  async function onDeployProduction() {
+  async function onRefreshEval() {
     if (!selected) return
-    setDeployingProd(true)
-    setError(null)
+    setLoadingEval(true)
     try {
-      const result = await deployProduction(selected.id)
-      const [steps, fresh, deps] = await Promise.all([
-        getPipeline(selected.id),
-        getProject(selected.id),
-        listDeployments(selected.id),
-      ])
-      setPipeline(steps)
-      setSelected(fresh)
-      setDeployments(deps)
-      setProjects((prev) => prev.map((p) => (p.id === fresh.id ? fresh : p)))
-      if (result.status === 'failed') {
-        setError(result.message)
-      }
+      const result = await getEvaluation(selected.id)
+      setEvaluation(result)
+      const latest = await getAnalysis(selected.id)
+      setAnalysis(latest)
+      log('Intelligence', `Evaluation: ${result.retrieval_accuracy}% accuracy`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Production deploy failed')
-      getPipeline(selected.id).then(setPipeline).catch(() => undefined)
+      log('Intelligence', `Evaluation error: ${err instanceof Error ? err.message : err}`)
     } finally {
-      setDeployingProd(false)
+      setLoadingEval(false)
     }
   }
 
-  async function onApproveProduction() {
+  async function onApprove() {
     if (!selected) return
     setApprovingProd(true)
-    setError(null)
     try {
-      const result = await approveProduction(selected.id)
+      await approveProduction(selected.id)
       const [steps, fresh, deps] = await Promise.all([
-        getPipeline(selected.id),
-        getProject(selected.id),
-        listDeployments(selected.id),
+        getPipeline(selected.id), getProject(selected.id), listDeployments(selected.id),
       ])
-      setPipeline(steps)
-      setSelected(fresh)
-      setDeployments(deps)
-      setProjects((prev) => prev.map((p) => (p.id === fresh.id ? fresh : p)))
-      if (result.status === 'failed') {
-        setError(result.message)
-      }
+      setPipeline(steps); setSelected(fresh); setDeployments(deps)
+      log('Kubernetes', 'Traffic switched to GREEN')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Approval failed')
-      getPipeline(selected.id).then(setPipeline).catch(() => undefined)
     } finally {
       setApprovingProd(false)
     }
@@ -242,665 +288,818 @@ export default function App() {
   async function onRollback() {
     if (!selected) return
     setRollingBack(true)
-    setError(null)
     try {
-      const result = await rollbackProduction(selected.id)
+      await rollbackProduction(selected.id)
       const [steps, fresh, deps] = await Promise.all([
-        getPipeline(selected.id),
-        getProject(selected.id),
-        listDeployments(selected.id),
+        getPipeline(selected.id), getProject(selected.id), listDeployments(selected.id),
       ])
-      setPipeline(steps)
-      setSelected(fresh)
-      setDeployments(deps)
-      setProjects((prev) => prev.map((p) => (p.id === fresh.id ? fresh : p)))
-      if (result.status === 'failed') {
-        setError(result.message)
-      }
+      setPipeline(steps); setSelected(fresh); setDeployments(deps)
+      log('Kubernetes', 'Rolled back to BLUE')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Rollback failed')
-      getPipeline(selected.id).then(setPipeline).catch(() => undefined)
     } finally {
       setRollingBack(false)
     }
   }
 
-  async function onAskQuestion(e: FormEvent) {
-    e.preventDefault()
-    if (!selected || !question.trim()) return
-    setAskingQuestion(true)
-    setError(null)
-    try {
-      const result = await askRepositoryQuestion(selected.id, question.trim())
-      setQaResult(result)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Repository Q&A failed')
-    } finally {
-      setAskingQuestion(false)
-    }
-  }
+  // ── derived ─────────────────────────────────────────────────────────────
+  const pipelineMap = Object.fromEntries(pipeline.map(s => [s.name, s]))
+  const extra = (analysis?.analysis_result ?? {}) as Record<string, unknown>
+  const recommendation = extra.deployment_recommendation as {
+    summary?: string; potential_issues?: string[]; recommendation?: string[]
+  } | undefined
+  const testResult = extra.test_result as Record<string, unknown> | undefined
+  const securityResult = extra.security_result as {
+    findings?: Array<{ severity: string; file: string; message: string }>; summary?: string
+  } | undefined
+  const dockerResult = extra.docker_result as { message?: string; dockerfile?: string } | undefined
+  const latestDeployment = deployments[0]
+  const smokeResult = (latestDeployment?.details as { smoke?: Record<string, unknown> } | null)?.smoke
+  const failureAnalysis = (latestDeployment?.details as { failure_analysis?: Record<string, unknown> } | null)?.failure_analysis
 
-  async function onRefreshEvaluation() {
-    if (!selected) return
-    setLoadingEvaluation(true)
-    setError(null)
-    try {
-      const result = await getEvaluation(selected.id)
-      setEvaluation(result)
-      const latest = await getAnalysis(selected.id)
-      setAnalysis(latest)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Evaluation failed')
-    } finally {
-      setLoadingEvaluation(false)
-    }
-  }
-
-  async function onRunAiTests() {
-    if (!selected) return
-    setRunningAiTests(true)
-    setError(null)
-    try {
-      const result = await runAiTests(selected.id)
-      setAiTests(result)
-      const latest = await getAnalysis(selected.id)
-      setAnalysis(latest)
-      const steps = await getPipeline(selected.id)
-      setPipeline(steps)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'AI-generated tests failed')
-    } finally {
-      setRunningAiTests(false)
-    }
-  }
-
-  const pipelineByName = Object.fromEntries(pipeline.map((s) => [s.name, s]))
-  const analysisExtra = (analysis?.analysis_result ?? {}) as Record<string, unknown>
-  const testResult = analysisExtra.test_result as Record<string, unknown> | undefined
-  const recommendation = analysisExtra.deployment_recommendation as
-    | {
-        summary?: string
-        detected?: Record<string, unknown>
-        potential_issues?: string[]
-        recommendation?: string[]
-        evidence?: string[]
-      }
-    | undefined
-  const securityResult = analysisExtra.security_result as
-    | { findings?: Array<{ severity: string; file: string; message: string }>; summary?: string }
-    | undefined
-  const securityFindings = securityResult?.findings ?? []
-  const failedDeployment = deployments.find((d) => d.status === 'failed')
-  const failureAnalysis = (failedDeployment?.details as { failure_analysis?: Record<string, unknown> } | null | undefined)
-    ?.failure_analysis
+  // ── sidebar ─────────────────────────────────────────────────────────────
+  const NAV: { id: Page; label: string; icon: string }[] = [
+    { id: 'overview', label: 'Overview', icon: '⬡' },
+    { id: 'repository', label: 'Repository', icon: '⎇' },
+    { id: 'assistant', label: 'AI Assistant', icon: '◈' },
+    { id: 'intelligence', label: 'Intelligence', icon: '◉' },
+    { id: 'testing', label: 'Testing', icon: '◻' },
+    { id: 'docker', label: 'Docker', icon: '▣' },
+    { id: 'kubernetes', label: 'Kubernetes', icon: '⬡' },
+    { id: 'logs', label: 'Logs', icon: '≡' },
+    { id: 'settings', label: 'Settings', icon: '⚙' },
+  ]
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-10 sm:px-6">
-      <header className="mb-10 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="mb-1 font-mono text-xs tracking-[0.2em] text-accent uppercase">
-            Software delivery assistant
-          </p>
-          <h1 className="text-4xl font-semibold tracking-tight text-ink sm:text-5xl">CodeDeck</h1>
-          <p className="mt-2 max-w-xl text-slate">
-            Analyze a GitHub repo, generate Docker and Kubernetes configs, and run a controlled
-            local deployment workflow.
-          </p>
+    <div className="flex h-screen overflow-hidden bg-zinc-950 text-zinc-200 font-mono">
+      {/* ── Sidebar ── */}
+      <aside className="flex w-52 shrink-0 flex-col border-r border-zinc-800 bg-zinc-900">
+        {/* Brand */}
+        <div className="border-b border-zinc-800 px-4 py-4">
+          <div className="text-xs tracking-widest text-zinc-500 uppercase">AI DevOps</div>
+          <div className="mt-0.5 text-lg font-bold tracking-tight text-white">CodeDeck</div>
         </div>
-        <div
-          className={`rounded-md border px-3 py-1.5 font-mono text-xs ${
-            apiOk === null
-              ? 'border-slate/20 text-slate'
-              : apiOk
-                ? 'border-ok/30 bg-ok/5 text-ok'
-                : 'border-danger/30 bg-danger/5 text-danger'
-          }`}
-        >
-          API {apiOk === null ? '…' : apiOk ? 'online' : 'offline'}
-        </div>
-      </header>
 
-      <section className="rounded-xl border border-ink/10 bg-white/80 p-6 shadow-sm backdrop-blur">
-        <h2 className="mb-4 text-lg font-medium">GitHub Repository</h2>
-        <form onSubmit={onAnalyze} className="flex flex-col gap-3 sm:flex-row">
-          <input
-            type="url"
-            required
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://github.com/owner/repo"
-            className="w-full rounded-lg border border-ink/15 bg-paper px-4 py-3 font-mono text-sm outline-none ring-accent focus:ring-2"
-          />
-          <button
-            type="submit"
-            disabled={busy}
-            className="shrink-0 rounded-lg bg-accent px-5 py-3 text-sm font-medium text-white transition hover:bg-accent-dark disabled:opacity-60"
-          >
-            {busy ? 'Analyzing…' : 'Analyze Repository'}
-          </button>
-        </form>
-        {error && <p className="mt-3 text-sm text-danger">{error}</p>}
-      </section>
-
-      <div className="mt-8 grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-        <section className="rounded-xl border border-ink/10 bg-white/80 p-6 shadow-sm">
-          <h2 className="mb-4 text-lg font-medium">Pipeline</h2>
-          <ol className="space-y-3">
-            {DEFAULT_STEPS.map((name) => {
-              const step = pipelineByName[name]
-              const status = step?.status ?? 'pending'
-              return (
-                <li key={name} className="flex items-start gap-3 text-sm">
-                  <span
-                    className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border font-mono text-xs ${
-                      status === 'warning'
-                        ? 'border-warn/40 text-warn'
-                        : status === 'completed'
-                          ? 'border-ok/40 text-ok'
-                          : status === 'failed'
-                            ? 'border-danger/40 text-danger'
-                            : status === 'running'
-                              ? 'border-accent/40 text-accent'
-                              : 'border-ink/15 text-slate'
-                    }`}
-                  >
-                    {stepIcon(status)}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-ink">{name}</span>
-                      <span className="ml-auto font-mono text-xs text-slate">{status}</span>
-                    </div>
-                    {step?.result && <p className="mt-0.5 text-xs text-slate">{step.result}</p>}
-                    {step?.error && <p className="mt-0.5 text-xs text-danger">{step.error}</p>}
-                  </div>
-                </li>
-              )
-            })}
-          </ol>
-        </section>
-
-        <section className="rounded-xl border border-ink/10 bg-white/80 p-6 shadow-sm">
-          <h2 className="mb-4 text-lg font-medium">Recent Projects</h2>
-          {projects.length === 0 ? (
-            <p className="text-sm text-slate">No projects yet. Submit a repository to get started.</p>
+        {/* Repo selector */}
+        <div className="border-b border-zinc-800 px-3 py-3">
+          <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-1">Repository</div>
+          {selected ? (
+            <div className="text-xs text-zinc-300 truncate" title={selected.repository_url}>
+              {selected.repository_name}
+            </div>
           ) : (
-            <ul className="space-y-2">
-              {projects.map((p) => (
-                <li key={p.id}>
-                  <button
-                    type="button"
-                    onClick={() => loadProject(p, true).catch((err) => setError(String(err.message || err)))}
-                    className={`w-full rounded-lg border px-3 py-2 text-left transition ${
-                      selected?.id === p.id
-                        ? 'border-accent bg-accent/5'
-                        : 'border-ink/10 hover:border-ink/25'
-                    }`}
-                  >
-                    <div className="font-medium">{p.repository_name}</div>
-                    <div className="truncate font-mono text-xs text-slate">{p.repository_url}</div>
-                    <div className="mt-1 font-mono text-xs text-slate">status: {p.status}</div>
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <div className="text-xs text-zinc-600">None loaded</div>
           )}
-        </section>
-      </div>
+          <div className={`mt-1 text-[10px] font-mono ${
+            selected?.status === 'ready' || selected?.status === 'staging_healthy'
+              ? 'text-emerald-500' : selected?.status === 'failed' ? 'text-red-500'
+              : selected?.status === 'analyzing' || selected?.status === 'deploying' ? 'text-yellow-500'
+              : 'text-zinc-600'
+          }`}>
+            {selected?.status ?? 'idle'}
+          </div>
+        </div>
 
-      <section className="mt-8 rounded-xl border border-ink/10 bg-white/80 p-6 shadow-sm">
-        <h2 className="mb-4 text-lg font-medium">Analysis</h2>
-        {!analysis ? (
-          <p className="text-sm text-slate">
-            Stack detection will appear here after you analyze a repository.
-          </p>
-        ) : (
-          <>
-            <dl className="grid gap-3 sm:grid-cols-2">
-              <div>
-                <dt className="font-mono text-xs text-slate uppercase">Language</dt>
-                <dd className="text-ink">{analysis.language ?? '—'}</dd>
-              </div>
-              <div>
-                <dt className="font-mono text-xs text-slate uppercase">Framework</dt>
-                <dd className="text-ink">{analysis.framework ?? '—'}</dd>
-              </div>
-              <div>
-                <dt className="font-mono text-xs text-slate uppercase">Package manager</dt>
-                <dd className="text-ink">{analysis.package_manager ?? '—'}</dd>
-              </div>
-              <div>
-                <dt className="font-mono text-xs text-slate uppercase">Entrypoint</dt>
-                <dd className="font-mono text-sm text-ink">{analysis.entrypoint ?? '—'}</dd>
-              </div>
-              <div>
-                <dt className="font-mono text-xs text-slate uppercase">Port</dt>
-                <dd className="font-mono text-sm text-ink">{String(analysisExtra.port ?? '—')}</dd>
-              </div>
-              <div>
-                <dt className="font-mono text-xs text-slate uppercase">Test command</dt>
-                <dd className="font-mono text-sm text-ink">{analysis.test_command ?? '—'}</dd>
-              </div>
-              <div>
-                <dt className="font-mono text-xs text-slate uppercase">Security score</dt>
-                <dd className="text-ink">
-                  {analysis.security_score != null ? `${analysis.security_score}/100` : '—'}
-                  <span className="ml-2 font-mono text-xs text-slate">(basic scan)</span>
-                </dd>
-              </div>
-            </dl>
+        {/* Nav */}
+        <nav className="flex-1 overflow-y-auto py-2">
+          {NAV.map(({ id, label, icon }) => (
+            <button
+              key={id}
+              onClick={() => setPage(id)}
+              className={`flex w-full items-center gap-2.5 px-4 py-2 text-xs transition-colors ${
+                page === id
+                  ? 'bg-zinc-800 text-white'
+                  : 'text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-300'
+              }`}
+            >
+              <span className="text-base">{icon}</span>
+              {label}
+            </button>
+          ))}
+        </nav>
 
-            {Boolean(analysisExtra.multiservice_notice) && (
-              <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-3 font-mono text-xs text-blue-900">
-                {String(analysisExtra.multiservice_notice)}
-              </div>
+        {/* API status */}
+        <div className="border-t border-zinc-800 px-4 py-3">
+          <div className={`flex items-center gap-2 text-[10px] ${apiOk ? 'text-emerald-500' : apiOk === false ? 'text-red-500' : 'text-zinc-600'}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${apiOk ? 'bg-emerald-500' : apiOk === false ? 'bg-red-500' : 'bg-zinc-600'}`} />
+            API {apiOk === null ? '…' : apiOk ? 'online' : 'offline'}
+          </div>
+        </div>
+      </aside>
+
+      {/* ── Main content ── */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Top bar */}
+        <header className="flex shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-900 px-6 py-3">
+          <div className="flex items-center gap-3">
+            <span className="text-xs uppercase tracking-widest text-zinc-500">{NAV.find(n => n.id === page)?.label}</span>
+          </div>
+          <div className="flex items-center gap-3">
+            {selected && (
+              <span className="rounded border border-zinc-700 bg-zinc-800 px-3 py-1 text-xs text-zinc-300">
+                {selected.repository_name}
+              </span>
             )}
-
-            {recommendation && (
-              <div className="mt-6 rounded-lg border border-ink/10 bg-paper p-4">
-                <h3 className="mb-2 text-sm font-medium">Deployment recommendation</h3>
-                <p className="text-sm text-ink">{recommendation.summary ?? 'No recommendation generated yet.'}</p>
-                {recommendation.potential_issues && recommendation.potential_issues.length > 0 && (
-                  <ul className="mt-3 space-y-1 text-sm text-slate">
-                    {recommendation.potential_issues.map((item) => (
-                      <li key={item}>- {item}</li>
-                    ))}
-                  </ul>
+            {selected && files.length > 0 && (
+              <>
+                <button
+                  onClick={() => { setPage('kubernetes'); onDeployStaging() }}
+                  disabled={deploying || busy}
+                  className="rounded bg-sky-700 px-3 py-1 text-xs font-medium text-white hover:bg-sky-600 disabled:opacity-50"
+                >
+                  {deploying ? 'Deploying…' : 'Deploy Staging'}
+                </button>
+                {selected.status === 'staging_healthy' && (
+                  <button
+                    onClick={() => deployProduction(selected.id)}
+                    disabled={deployingProd || busy}
+                    className="rounded bg-emerald-700 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+                  >
+                    Deploy Production
+                  </button>
                 )}
-                {recommendation.recommendation && recommendation.recommendation.length > 0 && (
-                  <ul className="mt-3 space-y-1 text-sm text-ink">
-                    {recommendation.recommendation.map((item) => (
-                      <li key={item}>- {item}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+              </>
             )}
+          </div>
+        </header>
 
+        {/* Page content */}
+        <main className="flex-1 overflow-y-auto p-6">
+          {error && (
+            <div className="mb-4 rounded border border-red-700/50 bg-red-950/40 px-4 py-3 text-sm text-red-300">
+              <span className="font-semibold">Error: </span>{error}
+              <button onClick={() => setError(null)} className="ml-3 text-red-500 hover:text-red-300">✕</button>
+            </div>
+          )}
 
-            {testResult && (
-              <div className="mt-6 border-t border-ink/10 pt-4">
-                <h3 className="mb-2 text-sm font-medium">Test result</h3>
-                <p className="text-sm text-ink">{String(testResult.message ?? testResult.status)}</p>
-                {testResult.command != null && (
-                  <p className="mt-1 font-mono text-xs text-slate">{String(testResult.command)}</p>
-                )}
-              </div>
-            )}
+          {/* ── OVERVIEW ── */}
+          {page === 'overview' && (
+            <div className="space-y-6 max-w-3xl">
+              <SectionTitle>GitHub Repository</SectionTitle>
+              <form onSubmit={onAnalyze} className="flex gap-2">
+                <input
+                  type="url"
+                  required
+                  value={url}
+                  onChange={e => setUrl(e.target.value)}
+                  placeholder="https://github.com/owner/repo"
+                  className="flex-1 rounded border border-zinc-700 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-200 placeholder-zinc-600 outline-none focus:border-sky-500"
+                />
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="rounded bg-sky-700 px-5 py-2.5 text-sm font-medium text-white hover:bg-sky-600 disabled:opacity-50"
+                >
+                  {busy ? 'Analyzing…' : 'Analyze'}
+                </button>
+              </form>
 
-            {securityFindings.length > 0 && (
-              <div className="mt-6 border-t border-ink/10 pt-4">
-                <h3 className="mb-2 text-sm font-medium">Security findings</h3>
-                <ul className="space-y-2">
-                  {securityFindings.map((f, i) => (
-                    <li key={`${f.file}-${i}`} className="rounded-lg border border-ink/10 px-3 py-2 text-sm">
-                      <span
-                        className={`font-mono text-xs ${
-                          f.severity === 'HIGH' ? 'text-danger' : 'text-warn'
+              {projects.length > 0 && (
+                <>
+                  <SectionTitle>Recent Projects</SectionTitle>
+                  <div className="space-y-1.5">
+                    {projects.slice(0, 8).map(p => (
+                      <button
+                        key={p.id}
+                        onClick={() => loadProject(p, true).catch(err => setError(String(err.message || err)))}
+                        className={`flex w-full items-center justify-between rounded border px-3 py-2 text-left text-xs transition ${
+                          selected?.id === p.id ? 'border-sky-700 bg-sky-950/40 text-sky-300' : 'border-zinc-800 hover:border-zinc-700 text-zinc-400 hover:text-zinc-200'
                         }`}
                       >
-                        {f.severity}
-                      </span>
-                      <span className="mx-2 text-slate">{f.file}</span>
-                      <span className="text-ink">{f.message}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </>
-        )}
-      </section>
-
-      <section className="mt-8 rounded-xl border border-ink/10 bg-white/80 p-6 shadow-sm">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-medium">Repository Q&A</h2>
-            <p className="text-sm text-slate">
-              Ask grounded questions against the indexed repository chunks and review the retrieved evidence.
-            </p>
-          </div>
-          <button
-            type="button"
-            disabled={!selected || loadingEvaluation}
-            onClick={() => onRefreshEvaluation()}
-            className="rounded-lg border border-ink/10 px-3 py-2 text-sm text-ink transition hover:bg-paper disabled:opacity-50"
-          >
-            {loadingEvaluation ? 'Refreshing evaluation...' : 'Refresh evaluation'}
-          </button>
-        </div>
-
-        <form onSubmit={onAskQuestion} className="flex flex-col gap-3 sm:flex-row">
-          <input
-            type="text"
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            placeholder="Where is authentication implemented?"
-            className="w-full rounded-lg border border-ink/15 bg-paper px-4 py-3 font-mono text-sm outline-none ring-accent focus:ring-2"
-          />
-          <button
-            type="submit"
-            disabled={!selected || askingQuestion}
-            className="shrink-0 rounded-lg bg-ink px-5 py-3 text-sm font-medium text-white transition hover:bg-ink/90 disabled:opacity-60"
-          >
-            {askingQuestion ? 'Searching...' : 'Ask'}
-          </button>
-        </form>
-
-        {qaResult && (
-          <div className="mt-5 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-            <div className="rounded-lg border border-ink/10 bg-paper p-4">
-              <div className="font-mono text-xs uppercase text-slate">Answer</div>
-              <p className="mt-2 text-sm text-ink">{qaResult.answer}</p>
-            </div>
-            <div className="rounded-lg border border-ink/10 bg-paper p-4">
-              <div className="font-mono text-xs uppercase text-slate">Retrieved context</div>
-              <div className="mt-2 space-y-3">
-                {qaResult.sources.map((source) => (
-                  <div key={`${source.path}-${source.line_start}`} className="text-sm">
-                    <div className="font-mono text-xs text-accent">
-                      {source.path}:{source.line_start}-{source.line_end} ({source.score.toFixed(2)})
-                    </div>
-                    <p className="mt-1 text-slate">{source.snippet}</p>
+                        <span className="font-medium">{p.repository_name}</span>
+                        <span className={`ml-2 rounded px-1.5 py-0.5 text-[10px] ${
+                          p.status === 'ready' || p.status === 'staging_healthy' ? 'bg-emerald-900 text-emerald-400'
+                          : p.status === 'failed' ? 'bg-red-900 text-red-400'
+                          : 'bg-zinc-800 text-zinc-500'
+                        }`}>{p.status}</span>
+                      </button>
+                    ))}
                   </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
+                </>
+              )}
 
-        {evaluation && (
-          <div className="mt-6 border-t border-ink/10 pt-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <h3 className="text-sm font-medium">Retrieval evaluation</h3>
-              <span className="rounded bg-accent/10 px-2 py-1 font-mono text-xs text-accent">
-                {evaluation.correct}/{evaluation.questions} relevant
-              </span>
-              <span className="font-mono text-xs text-slate">
-                accuracy: {evaluation.retrieval_accuracy}%
-              </span>
-            </div>
-            <div className="mt-3 space-y-2">
-              {evaluation.results.map((item) => (
-                <div key={item.question} className="rounded-lg border border-ink/10 px-3 py-2 text-sm">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-ink">{item.question}</span>
-                    <span className="ml-auto font-mono text-xs text-slate">{item.status}</span>
+              {selected && (
+                <>
+                  <SectionTitle>Pipeline Status</SectionTitle>
+                  <div className="space-y-1">
+                    {PIPELINE_STEPS.map(name => {
+                      const step = pipelineMap[name]
+                      const s = step?.status ?? 'pending'
+                      return (
+                        <div key={name} className="flex items-start gap-3 rounded border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-xs">
+                          <span className={`shrink-0 font-bold ${statusColor(s)}`}>{stepIcon(s)}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex justify-between">
+                              <span className="text-zinc-300">{name}</span>
+                              <span className={`ml-2 shrink-0 rounded border px-1.5 py-0.5 text-[10px] ${statusBg(s)}`}>{s}</span>
+                            </div>
+                            {step?.result && <div className="mt-0.5 truncate text-zinc-500">{step.result}</div>}
+                            {step?.error && <div className="mt-0.5 truncate text-red-400">{step.error}</div>}
+                          </div>
+                        </div>
+                      )
+                    })}
                   </div>
-                  <p className="mt-1 text-xs text-slate">expected: {item.expected}</p>
-                  <p className="mt-1 text-xs text-ink">{item.answer}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </section>
-
-      <section className="mt-8 rounded-xl border border-ink/10 bg-white/80 p-6 shadow-sm">
-        <h2 className="mb-4 text-lg font-medium">Generated Files</h2>
-        {files.length === 0 ? (
-          <p className="text-sm text-slate">Dockerfile and Kubernetes manifests will appear here after generation.</p>
-        ) : (
-          <div className="grid gap-4 lg:grid-cols-[12rem_1fr]">
-            <ul className="space-y-1">
-              {files.map((f) => (
-                <li key={f.filename}>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedFile(f.filename)}
-                    className={`w-full rounded-md px-3 py-2 text-left font-mono text-xs transition ${
-                      selectedFile === f.filename
-                        ? 'bg-accent/10 text-accent'
-                        : 'text-slate hover:bg-ink/5'
-                    }`}
-                  >
-                    {f.filename}
-                  </button>
-                </li>
-              ))}
-            </ul>
-            <pre className="max-h-[28rem] overflow-auto rounded-lg border border-ink/10 bg-paper p-4 font-mono text-xs leading-relaxed text-ink">
-              {files.find((f) => f.filename === selectedFile)?.content ?? ''}
-            </pre>
-          </div>
-        )}
-      </section>
-
-      <section className="mt-8 rounded-xl border border-ink/10 bg-white/80 p-6 shadow-sm">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-medium">AI Testing</h2>
-            <p className="text-sm text-slate">
-              Generate a very small route-focused test set from the detected repository entrypoint and run it safely.
-            </p>
-          </div>
-          <button
-            type="button"
-            disabled={!selected || runningAiTests}
-            onClick={() => onRunAiTests()}
-            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-accent-dark disabled:opacity-60"
-          >
-            {runningAiTests ? 'Running AI tests...' : 'Run AI-generated tests'}
-          </button>
-        </div>
-
-        {!aiTests ? (
-          <p className="text-sm text-slate">No AI-generated tests have been run for this project yet.</p>
-        ) : (
-          <div className="space-y-4">
-            <div className="rounded-lg border border-ink/10 bg-paper p-4">
-              <div className="flex items-center gap-2">
-                <span className="font-medium text-ink">{aiTests.message}</span>
-                <span className="ml-auto font-mono text-xs text-slate">{aiTests.status}</span>
-              </div>
-              {aiTests.command && (
-                <p className="mt-2 font-mono text-xs text-slate">{aiTests.command}</p>
+                </>
               )}
             </div>
+          )}
 
-            {aiTests.generated_tests.map((testCase) => (
-              <div key={testCase.path} className="rounded-lg border border-ink/10 bg-white p-4">
-                <div className="font-medium text-ink">{testCase.name}</div>
-                <p className="mt-1 text-sm text-slate">{testCase.rationale}</p>
-                <pre className="mt-3 max-h-72 overflow-auto rounded-lg border border-ink/10 bg-paper p-3 font-mono text-xs leading-relaxed text-ink">
-                  {testCase.code}
-                </pre>
-              </div>
-            ))}
+          {/* ── REPOSITORY ── */}
+          {page === 'repository' && (
+            <div className="space-y-6 max-w-3xl">
+              <SectionTitle>Repository Details</SectionTitle>
+              {!selected ? (
+                <p className="text-sm text-zinc-500">No repository loaded. Use Overview to analyze one.</p>
+              ) : (
+                <>
+                  <div className="rounded border border-zinc-800 bg-zinc-900/60 px-4 py-3">
+                    <div className="text-[10px] uppercase tracking-widest text-zinc-600">URL</div>
+                    <div className="mt-1 break-all text-xs text-sky-400">{selected.repository_url}</div>
+                  </div>
+                  {analysis ? (
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                      <Pill label="Language" value={analysis.language} />
+                      <Pill label="Framework" value={analysis.framework} />
+                      <Pill label="Package Manager" value={analysis.package_manager} />
+                      <Pill label="Entry Point" value={analysis.entrypoint} />
+                      <Pill label="Port" value={String(extra.port ?? '—')} />
+                      <Pill label="Test Command" value={analysis.test_command} />
+                      <Pill label="Dockerfile" value={analysis.has_dockerfile ? 'Present' : 'Not found'} />
+                      <Pill label="Security Score" value={analysis.security_score != null ? `${analysis.security_score}/100` : null} />
+                    </div>
+                  ) : (
+                    <p className="text-sm text-zinc-500">Run analysis to see repository details.</p>
+                  )}
 
-            {(aiTests.stdout || aiTests.stderr) && (
-              <div className="grid gap-4 lg:grid-cols-2">
-                <pre className="max-h-72 overflow-auto rounded-lg border border-ink/10 bg-paper p-3 font-mono text-xs leading-relaxed text-ink">
-                  {aiTests.stdout || 'No stdout'}
-                </pre>
-                <pre className="max-h-72 overflow-auto rounded-lg border border-ink/10 bg-paper p-3 font-mono text-xs leading-relaxed text-ink">
-                  {aiTests.stderr || 'No stderr'}
-                </pre>
-              </div>
-            )}
+                  {(extra.multiservice_notice as string | undefined) && (
+                    <div className="rounded border border-sky-700/30 bg-sky-950/30 p-3 text-xs text-sky-300">
+                      {String(extra.multiservice_notice)}
+                    </div>
+                  )}
 
-            {aiTests.failure_analysis && (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
-                <h3 className="font-medium">AI test failure analysis</h3>
-                <p className="mt-2">{String(aiTests.failure_analysis.likely_cause ?? 'No analysis')}</p>
-                <p className="mt-2 text-xs">
-                  Suggested fix: {String(aiTests.failure_analysis.suggested_fix ?? 'Review the logs and generated test code.')}
-                </p>
-              </div>
-            )}
-          </div>
-        )}
-      </section>
-
-      <section className="mt-8 rounded-xl border border-ink/10 bg-white/80 p-6 shadow-sm">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-medium">Deployment Workflow</h2>
-            <p className="text-sm text-slate">
-              Staging &amp; Blue-Green Production deployment with human-in-the-loop approval.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              disabled={!selected || files.length === 0 || deploying || busy}
-              onClick={() => onDeployStaging()}
-              className="rounded-lg bg-ink px-4 py-2 text-sm font-medium text-white transition hover:bg-ink/90 disabled:opacity-50"
-            >
-              {deploying ? 'Deploying Staging…' : 'Deploy Staging'}
-            </button>
-            <button
-              type="button"
-              disabled={!selected || files.length === 0 || deployingProd || busy}
-              onClick={() => onDeployProduction()}
-              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-700 disabled:opacity-50"
-            >
-              {deployingProd ? 'Deploying GREEN…' : 'Deploy Production (GREEN)'}
-            </button>
-          </div>
-        </div>
-
-        {/* Approval Alert Banner */}
-        {selected?.status === 'production_awaiting_approval' && (
-          <div className="mb-6 rounded-lg border border-amber-300 bg-amber-50 p-4 shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h3 className="font-semibold text-amber-900">Production Approval Required</h3>
-                <p className="text-sm text-amber-800">
-                  GREEN version is built, deployed, and verified. Approve to switch live traffic to GREEN.
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  disabled={approvingProd}
-                  onClick={() => onApproveProduction()}
-                  className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white shadow transition hover:bg-emerald-700 disabled:opacity-50"
-                >
-                  {approvingProd ? 'Switching Traffic…' : 'Approve Production'}
-                </button>
-                <button
-                  type="button"
-                  disabled={rollingBack}
-                  onClick={() => onRollback()}
-                  className="rounded-lg border border-rose-300 bg-white px-4 py-2 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
-                >
-                  {rollingBack ? 'Rolling Back…' : 'Rollback to BLUE'}
-                </button>
-              </div>
+                  {files.length > 0 && (
+                    <>
+                      <SectionTitle>Generated Files</SectionTitle>
+                      <div className="flex gap-3">
+                        <ul className="w-36 shrink-0 space-y-1">
+                          {files.map(f => (
+                            <li key={f.filename}>
+                              <button
+                                onClick={() => setSelectedFile(f.filename)}
+                                className={`w-full rounded px-2 py-1 text-left text-xs transition ${
+                                  selectedFile === f.filename ? 'bg-sky-900/40 text-sky-300' : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
+                                }`}
+                              >
+                                {f.filename}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                        <TerminalBlock text={files.find(f => f.filename === selectedFile)?.content ?? ''} maxH="24rem" />
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
             </div>
-          </div>
-        )}
+          )}
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="rounded-lg border border-ink/10 bg-paper p-4">
-            <div className="font-mono text-xs text-slate uppercase">Staging Status</div>
-            <div className="mt-1 flex items-center justify-between">
-              <span className="font-medium text-ink">
-                {deployments.find((d) => d.environment === 'staging')?.status ?? 'Not deployed'}
-              </span>
-              <span className="rounded bg-accent/10 px-2 py-0.5 font-mono text-xs text-accent">
-                BLUE
-              </span>
+          {/* ── AI ASSISTANT ── */}
+          {page === 'assistant' && (
+            <div className="flex h-full max-h-[calc(100vh-8rem)] flex-col gap-4 max-w-3xl">
+              <SectionTitle>CodeDeck AI Assistant</SectionTitle>
+              {!selected ? (
+                <p className="text-sm text-zinc-500">Load a repository first.</p>
+              ) : (
+                <>
+                  <div className="text-xs text-zinc-500">
+                    Ask questions grounded in the indexed repository. Answers cite retrieved source files.
+                  </div>
+
+                  <form onSubmit={onAsk} className="flex gap-2">
+                    <input
+                      type="text"
+                      value={question}
+                      onChange={e => setQuestion(e.target.value)}
+                      placeholder="Where is authentication implemented?"
+                      className="flex-1 rounded border border-zinc-700 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-200 placeholder-zinc-600 outline-none focus:border-sky-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={askingQuestion}
+                      className="rounded bg-sky-700 px-5 py-2.5 text-sm font-medium text-white hover:bg-sky-600 disabled:opacity-50"
+                    >
+                      {askingQuestion ? 'Searching…' : 'Ask'}
+                    </button>
+                  </form>
+
+                  {/* Quick questions */}
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      'What framework does this project use?',
+                      'What is the application entry point?',
+                      'What database is being used?',
+                      'What port does the application use?',
+                      'How is the project structured?',
+                    ].map(q => (
+                      <button
+                        key={q}
+                        onClick={() => setQuestion(q)}
+                        className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-400 hover:border-sky-700 hover:text-sky-300"
+                      >
+                        {q}
+                      </button>
+                    ))}
+                  </div>
+
+                  {qaResult && (
+                    <div className="flex flex-1 gap-4 overflow-hidden">
+                      <div className="flex-1 overflow-y-auto space-y-3">
+                        <div className="rounded border border-zinc-700 bg-zinc-900/60 p-4">
+                          <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-2">Answer</div>
+                          <p className="text-sm leading-relaxed text-zinc-200">{qaResult.answer}</p>
+                        </div>
+                        {qaResult.sources.length > 0 && (
+                          <div className="rounded border border-zinc-700 bg-zinc-900/60 p-4">
+                            <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-3">Retrieved Evidence</div>
+                            <div className="space-y-3">
+                              {qaResult.sources.map(src => (
+                                <div key={`${src.path}-${src.line_start}`} className="text-xs">
+                                  <div className="font-mono text-sky-400">
+                                    {src.path}:{src.line_start}–{src.line_end}
+                                    <span className="ml-2 text-zinc-600">score {src.score.toFixed(2)}</span>
+                                  </div>
+                                  <p className="mt-1 text-zinc-400 leading-relaxed">{src.snippet}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
-          </div>
-          <div className="rounded-lg border border-ink/10 bg-paper p-4">
-            <div className="font-mono text-xs text-slate uppercase">Production Status</div>
-            <div className="mt-1 flex items-center justify-between">
-              <span className="font-medium text-ink">
-                {selected?.status === 'production_healthy'
-                  ? 'Active (GREEN)'
-                  : selected?.status === 'production_awaiting_approval'
-                    ? 'Awaiting Approval'
-                    : selected?.status === 'rolled_back'
-                      ? 'Rolled Back (BLUE)'
-                      : 'Not deployed'}
-              </span>
-              <div className="flex items-center gap-2">
-                {(selected?.status === 'production_healthy' || selected?.status === 'rolled_back') && (
+          )}
+
+          {/* ── REPOSITORY INTELLIGENCE ── */}
+          {page === 'intelligence' && (
+            <div className="space-y-6 max-w-3xl">
+              <SectionTitle>Repository Intelligence</SectionTitle>
+              {!selected || !analysis ? (
+                <p className="text-sm text-zinc-500">Analyze a repository to see intelligence data.</p>
+              ) : (
+                <>
+                  {/* Recommendation */}
+                  {recommendation && (
+                    <div className="rounded border border-zinc-700 bg-zinc-900/60 p-4 space-y-3">
+                      <div className="text-[10px] uppercase tracking-widest text-zinc-600">Deployment Recommendation</div>
+                      <p className="text-sm text-zinc-200 leading-relaxed">{recommendation.summary}</p>
+                      {(recommendation.potential_issues ?? []).length > 0 && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-widest text-orange-500 mb-1">Potential Issues</div>
+                          <ul className="space-y-0.5">
+                            {recommendation.potential_issues!.map(i => (
+                              <li key={i} className="text-xs text-orange-300">⚠ {i}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {(recommendation.recommendation ?? []).length > 0 && (
+                        <ul className="space-y-0.5">
+                          {recommendation.recommendation!.map(i => (
+                            <li key={i} className="text-xs text-zinc-400">→ {i}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+
+                  {/* RAG index info */}
+                  {(extra.repository_index as { file_count?: number; chunk_count?: number } | undefined) && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <Pill label="Indexed Files" value={(extra.repository_index as { file_count?: number }).file_count} />
+                      <Pill label="Index Chunks" value={(extra.repository_index as { chunk_count?: number }).chunk_count} />
+                    </div>
+                  )}
+
+                  {/* Evaluation */}
+                  <div className="flex items-center justify-between">
+                    <div className="text-[10px] uppercase tracking-widest text-zinc-600">Retrieval Evaluation</div>
+                    <button
+                      onClick={onRefreshEval}
+                      disabled={loadingEval}
+                      className="rounded border border-zinc-700 px-3 py-1 text-xs text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
+                    >
+                      {loadingEval ? 'Refreshing…' : 'Refresh'}
+                    </button>
+                  </div>
+                  {evaluation && (
+                    <div className="space-y-2">
+                      <div className="flex gap-4 text-xs">
+                        <span className="text-zinc-400">{evaluation.correct}/{evaluation.questions} correct</span>
+                        <span className="text-emerald-400 font-bold">{evaluation.retrieval_accuracy}% accuracy</span>
+                      </div>
+                      {evaluation.results.map(item => (
+                        <div key={item.question} className="rounded border border-zinc-800 px-3 py-2 text-xs">
+                          <div className="flex justify-between">
+                            <span className="text-zinc-300">{item.question}</span>
+                            <span className={item.status === 'correct' ? 'text-emerald-400' : 'text-orange-400'}>{item.status}</span>
+                          </div>
+                          <div className="mt-0.5 text-zinc-500 truncate">{item.answer}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Security */}
+                  {securityResult && (
+                    <>
+                      <div className="text-[10px] uppercase tracking-widest text-zinc-600 mt-2">Security Scan</div>
+                      <div className="text-xs text-zinc-400">{securityResult.summary}</div>
+                      {(securityResult.findings ?? []).length > 0 && (
+                        <div className="space-y-1">
+                          {securityResult.findings!.map((f, i) => (
+                            <div key={i} className="flex gap-2 rounded border border-zinc-800 px-3 py-1.5 text-xs">
+                              <span className={f.severity === 'HIGH' ? 'text-red-400' : 'text-orange-400'}>{f.severity}</span>
+                              <span className="text-zinc-500">{f.file}</span>
+                              <span className="text-zinc-300">{f.message}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ── TESTING ── */}
+          {page === 'testing' && (
+            <div className="space-y-6 max-w-3xl">
+              <SectionTitle>Testing</SectionTitle>
+              {!selected ? (
+                <p className="text-sm text-zinc-500">Load a repository first.</p>
+              ) : (
+                <>
+                  {/* Existing test result */}
+                  {testResult && (
+                    <div className="rounded border border-zinc-700 bg-zinc-900/60 p-4">
+                      <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-2">Existing Tests (run during analysis)</div>
+                      <div className="flex items-center gap-3">
+                        <span className={testResult.status === 'passed' ? 'text-emerald-400' : testResult.status === 'skipped' ? 'text-zinc-500' : 'text-red-400'}>
+                          {testResult.status === 'passed' ? '✓ PASSED' : testResult.status === 'skipped' ? '○ SKIPPED' : '✗ FAILED'}
+                        </span>
+                        <span className="text-xs text-zinc-400">{String(testResult.message ?? '')}</span>
+                      </div>
+                      {Boolean(testResult.command) && <div className="mt-2 font-mono text-xs text-zinc-500">{String(testResult.command)}</div>}
+                    </div>
+                  )}
+
+                  {/* AI tests */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-medium text-zinc-200">AI-Generated Tests</div>
+                      <div className="text-xs text-zinc-500 mt-0.5">
+                        Generates route-level tests for FastAPI / Flask repositories and runs them via pytest.
+                      </div>
+                    </div>
+                    <button
+                      onClick={onRunAiTests}
+                      disabled={runningAiTests}
+                      className="rounded bg-sky-700 px-4 py-2 text-xs font-medium text-white hover:bg-sky-600 disabled:opacity-50"
+                    >
+                      {runningAiTests ? 'Running…' : 'Run AI Tests'}
+                    </button>
+                  </div>
+
+                  {aiTests && (
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-3 rounded border border-zinc-700 bg-zinc-900/60 px-4 py-3 text-xs">
+                        <span className={
+                          aiTests.status === 'passed' ? 'text-emerald-400 font-bold' :
+                          aiTests.status === 'skipped' ? 'text-zinc-500' : 'text-red-400 font-bold'
+                        }>
+                          {aiTests.status === 'passed' ? '✓ PASSED' : aiTests.status === 'skipped' ? '○ SKIPPED' : '✗ FAILED'}
+                        </span>
+                        <span className="text-zinc-300">{aiTests.message}</span>
+                        {aiTests.command && <span className="ml-auto text-zinc-600 font-mono">{aiTests.command}</span>}
+                      </div>
+
+                      {aiTests.generated_tests.map(tc => (
+                        <div key={tc.path} className="space-y-2">
+                          <div className="text-xs font-medium text-zinc-300">{tc.name}</div>
+                          <div className="text-xs text-zinc-500">{tc.rationale}</div>
+                          <TerminalBlock text={tc.code} maxH="12rem" />
+                        </div>
+                      ))}
+
+                      {(aiTests.stdout || aiTests.stderr) && (
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div>
+                            <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-1">stdout</div>
+                            <TerminalBlock text={aiTests.stdout || 'No output'} maxH="10rem" />
+                          </div>
+                          <div>
+                            <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-1">stderr</div>
+                            <TerminalBlock text={aiTests.stderr || 'No output'} maxH="10rem" />
+                          </div>
+                        </div>
+                      )}
+
+                      {aiTests.failure_analysis && (
+                        <div className="rounded border border-orange-700/30 bg-orange-950/20 p-4 text-xs">
+                          <div className="text-[10px] uppercase tracking-widest text-orange-500 mb-2">AI Failure Analysis</div>
+                          <p className="text-orange-200">{String(aiTests.failure_analysis.likely_cause ?? 'No analysis')}</p>
+                          {Boolean(aiTests.failure_analysis.suggested_fix) && (
+                            <p className="mt-2 text-orange-300/70">
+                              → {String(aiTests.failure_analysis.suggested_fix)}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ── DOCKER ── */}
+          {page === 'docker' && (
+            <div className="space-y-6 max-w-3xl">
+              <SectionTitle>Docker</SectionTitle>
+              {!selected || !analysis ? (
+                <p className="text-sm text-zinc-500">Analyze a repository first.</p>
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Pill label="Dockerfile" value={analysis.has_dockerfile ? 'Present in repo' : 'Generated'} />
+                    <Pill label="Application Port" value={String(extra.port ?? '—')} />
+                    <Pill label="Framework" value={analysis.framework} />
+                    <Pill label="Entry Point" value={analysis.entrypoint} />
+                  </div>
+
+                  {dockerResult && (
+                    <div className="rounded border border-zinc-700 bg-zinc-900/60 p-4">
+                      <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-2">Docker Generation</div>
+                      <div className="text-xs text-zinc-300">{dockerResult.message}</div>
+                    </div>
+                  )}
+
+                  {files.find(f => f.filename === 'Dockerfile') && (
+                    <>
+                      <div className="text-[10px] uppercase tracking-widest text-zinc-600">Dockerfile</div>
+                      <TerminalBlock text={files.find(f => f.filename === 'Dockerfile')!.content} maxH="18rem" />
+                    </>
+                  )}
+
+                  {/* Build status from deployments */}
+                  {latestDeployment && (
+                    <div className="rounded border border-zinc-700 bg-zinc-900/60 px-4 py-3 text-xs">
+                      <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-2">Last Build / Deploy</div>
+                      <div className="flex gap-4">
+                        <span className={latestDeployment.status === 'healthy' ? 'text-emerald-400' : latestDeployment.status === 'failed' ? 'text-red-400' : 'text-yellow-400'}>
+                          {latestDeployment.status}
+                        </span>
+                        <span className="text-zinc-500">{latestDeployment.environment} / {latestDeployment.version}</span>
+                        {(latestDeployment.details as { image?: string } | null)?.image && (
+                          <span className="font-mono text-zinc-400">{(latestDeployment.details as { image?: string })!.image}</span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   <button
-                    type="button"
-                    disabled={rollingBack}
-                    onClick={() => onRollback()}
-                    className="rounded border border-rose-300 bg-rose-50 px-2 py-0.5 font-mono text-xs text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+                    onClick={() => { setPage('kubernetes'); onDeployStaging() }}
+                    disabled={deploying || busy || files.length === 0}
+                    className="rounded bg-sky-700 px-4 py-2 text-xs font-medium text-white hover:bg-sky-600 disabled:opacity-50"
                   >
-                    {rollingBack ? '…' : 'Rollback'}
+                    {deploying ? 'Building & Deploying…' : 'Build & Deploy to Staging'}
                   </button>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ── KUBERNETES ── */}
+          {page === 'kubernetes' && (
+            <div className="space-y-6 max-w-3xl">
+              <SectionTitle>Kubernetes / kind</SectionTitle>
+              {!selected ? (
+                <p className="text-sm text-zinc-500">Load a repository first.</p>
+              ) : (
+                <>
+                  {/* Pipeline steps for K8s */}
+                  {(['Docker', 'Kubernetes', 'Staging'] as const).map(name => {
+                    const step = pipelineMap[name]
+                    const s = step?.status ?? 'pending'
+                    return (
+                      <div key={name} className="flex items-center gap-3 rounded border border-zinc-800 px-4 py-3 text-xs">
+                        <span className={`font-bold text-base ${statusColor(s)}`}>{stepIcon(s)}</span>
+                        <div className="flex-1">
+                          <div className="flex justify-between">
+                            <span className="text-zinc-200">{name}</span>
+                            <span className={`rounded border px-1.5 py-0.5 text-[10px] ${statusBg(s)}`}>{s}</span>
+                          </div>
+                          {step?.result && <div className="mt-0.5 text-zinc-500">{step.result}</div>}
+                          {step?.error && <div className="mt-0.5 text-red-400">{step.error}</div>}
+                        </div>
+                      </div>
+                    )
+                  })}
+
+                  {/* Deploy controls */}
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      onClick={onDeployStaging}
+                      disabled={deploying || busy || files.length === 0}
+                      className="rounded bg-sky-700 px-4 py-2 text-xs font-medium text-white hover:bg-sky-600 disabled:opacity-50"
+                    >
+                      {deploying ? 'Deploying Staging…' : 'Deploy Staging'}
+                    </button>
+                    {selected.status === 'staging_healthy' && (
+                      <button
+                        onClick={() => { setDeployingProd(true); deployProduction(selected.id).finally(() => { setDeployingProd(false); loadProject(selected) }) }}
+                        disabled={deployingProd}
+                        className="rounded bg-emerald-700 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+                      >
+                        {deployingProd ? 'Deploying GREEN…' : 'Deploy Production (GREEN)'}
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Approval banner */}
+                  {selected.status === 'production_awaiting_approval' && (
+                    <div className="rounded border border-yellow-700/50 bg-yellow-950/30 p-4">
+                      <div className="text-sm font-medium text-yellow-300 mb-2">Production Approval Required</div>
+                      <p className="text-xs text-yellow-400 mb-3">GREEN version deployed and verified. Approve to switch live traffic.</p>
+                      <div className="flex gap-3">
+                        <button
+                          onClick={onApprove}
+                          disabled={approvingProd}
+                          className="rounded bg-emerald-700 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+                        >
+                          {approvingProd ? 'Switching…' : 'Approve Production'}
+                        </button>
+                        <button
+                          onClick={onRollback}
+                          disabled={rollingBack}
+                          className="rounded border border-red-700 px-4 py-2 text-xs text-red-400 hover:bg-red-950 disabled:opacity-50"
+                        >
+                          {rollingBack ? 'Rolling back…' : 'Rollback to BLUE'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Smoke test result */}
+                  {smokeResult && (
+                    <div className={`rounded border p-4 text-xs ${
+                      smokeResult.status === 'passed'
+                        ? 'border-emerald-700/30 bg-emerald-950/20'
+                        : 'border-red-700/30 bg-red-950/20'
+                    }`}>
+                      <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-2">Smoke Test</div>
+                      <div className={`font-bold ${smokeResult.status === 'passed' ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {smokeResult.status === 'passed' ? '✓ PASSED' : '✗ FAILED'}
+                      </div>
+                      <div className="mt-1 text-zinc-400">{String(smokeResult.message ?? '')}</div>
+                      {Boolean(smokeResult.url) && <div className="mt-1 font-mono text-zinc-500">{String(smokeResult.url)}</div>}
+                    </div>
+                  )}
+
+                  {/* Deployment history */}
+                  {deployments.length > 0 && (
+                    <>
+                      <div className="text-[10px] uppercase tracking-widest text-zinc-600 mt-2">Deployment History</div>
+                      <div className="space-y-1.5">
+                        {deployments.map(d => (
+                          <div key={d.id} className="flex items-center gap-3 rounded border border-zinc-800 px-3 py-2 text-xs">
+                            <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                              d.version === 'green' ? 'bg-emerald-900 text-emerald-400' : 'bg-sky-900 text-sky-400'
+                            }`}>{d.version.toUpperCase()}</span>
+                            <span className="text-zinc-400 capitalize">{d.environment}</span>
+                            <span className={`ml-auto font-semibold ${
+                              d.status === 'healthy' ? 'text-emerald-400' :
+                              d.status === 'failed' ? 'text-red-400' :
+                              d.status === 'awaiting_approval' ? 'text-yellow-400' : 'text-zinc-400'
+                            }`}>{d.status}</span>
+                            <span className="text-zinc-600">{new Date(d.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+
+                  {/* Failure analysis */}
+                  {failureAnalysis && (
+                    <div className="rounded border border-orange-700/30 bg-orange-950/20 p-4 text-xs">
+                      <div className="text-[10px] uppercase tracking-widest text-orange-500 mb-2">Failure Analysis</div>
+                      <p className="text-orange-200">{String(failureAnalysis.likely_cause ?? 'No analysis')}</p>
+                      {Boolean(failureAnalysis.suggested_fix) && (
+                        <p className="mt-2 text-orange-300/70">→ {String(failureAnalysis.suggested_fix)}</p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ── LOGS ── */}
+          {page === 'logs' && (
+            <div className="space-y-4 max-w-4xl">
+              <SectionTitle>Activity Logs</SectionTitle>
+              <div className="flex justify-between items-center">
+                <div className="text-xs text-zinc-500">{logs.length} entries</div>
+                <button onClick={() => setLogs([])} className="text-xs text-zinc-600 hover:text-zinc-400">Clear</button>
+              </div>
+              <div className="overflow-y-auto rounded border border-zinc-800 bg-zinc-950" style={{ maxHeight: 'calc(100vh - 14rem)' }}>
+                {logs.length === 0 ? (
+                  <div className="p-6 text-center text-xs text-zinc-700">No log entries yet. Run analysis or deployment.</div>
+                ) : (
+                  <div className="divide-y divide-zinc-900">
+                    {logs.map((entry, i) => (
+                      <div key={i} className="flex gap-3 px-4 py-2 text-xs hover:bg-zinc-900/40">
+                        <span className="shrink-0 text-zinc-700 tabular-nums">{entry.ts}</span>
+                        <span className={`shrink-0 w-20 font-semibold ${
+                          entry.tag === 'Analysis' ? 'text-sky-400' :
+                          entry.tag === 'Q&A' ? 'text-purple-400' :
+                          entry.tag === 'Testing' ? 'text-yellow-400' :
+                          entry.tag.startsWith('Docker') ? 'text-orange-400' :
+                          'text-zinc-400'
+                        }`}>[{entry.tag}]</span>
+                        <span className={entry.text.startsWith('ERROR') ? 'text-red-300' : 'text-zinc-300'}>{entry.text}</span>
+                      </div>
+                    ))}
+                  </div>
                 )}
-                <span
-                  className={`rounded px-2 py-0.5 font-mono text-xs ${
-                    selected?.status === 'production_healthy'
-                      ? 'bg-emerald-100 text-emerald-800'
-                      : 'bg-slate/10 text-slate'
-                  }`}
-                >
-                  {selected?.status === 'production_healthy' ? 'GREEN' : 'BLUE'}
-                </span>
               </div>
             </div>
-          </div>
-        </div>
+          )}
 
-        {deployments.length > 0 && (
-          <div className="mt-6 border-t border-ink/10 pt-4">
-            <h3 className="mb-3 text-sm font-semibold text-ink">Deployment History</h3>
-            <div className="space-y-2">
-              {deployments.map((d) => (
-                <div key={d.id} className="flex flex-col gap-1 rounded-lg border border-ink/10 bg-white p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex items-center gap-3">
-                    <span
-                      className={`inline-block rounded px-2 py-0.5 font-mono text-xs font-semibold ${
-                        d.version === 'green'
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : 'bg-blue-100 text-blue-800'
-                      }`}
-                    >
-                      {d.version.toUpperCase()}
-                    </span>
-                    <span className="font-medium text-ink capitalize">{d.environment}</span>
-                    <span className="font-mono text-xs text-slate">({d.deployment_type})</span>
-                  </div>
-                  <div className="flex items-center gap-4 text-xs">
-                    <span
-                      className={`font-semibold capitalize ${
-                        d.status === 'healthy' || d.status === 'passed'
-                          ? 'text-ok'
-                          : d.status === 'awaiting_approval'
-                            ? 'text-warn'
-                            : d.status === 'rolled_back'
-                              ? 'text-purple-600'
-                              : 'text-danger'
-                      }`}
-                    >
-                      {d.status.replace('_', ' ')}
-                    </span>
-                    <span className="font-mono text-slate">
-                      {new Date(d.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </span>
-                  </div>
-                  {d.details && 'message' in d.details && (
-                    <div className="w-full text-xs text-slate sm:w-auto">
-                      {String(d.details.message)}
+          {/* ── SETTINGS ── */}
+          {page === 'settings' && (
+            <div className="space-y-6 max-w-xl">
+              <SectionTitle>System Status</SectionTitle>
+              {!systemStatus ? (
+                <p className="text-sm text-zinc-500">Loading system status…</p>
+              ) : (
+                <div className="space-y-2">
+                  {([
+                    ['Backend API', systemStatus.backend],
+                    ['Database', systemStatus.database],
+                    ['Docker', systemStatus.docker],
+                    ['kind', systemStatus.kind],
+                    ['kubectl', systemStatus.kubectl],
+                  ] as [string, { ok: boolean; message: string }][]).map(([name, stat]) => (
+                    <div key={name} className="flex items-center justify-between rounded border border-zinc-800 px-4 py-3 text-xs">
+                      <span className="text-zinc-400">{name}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-zinc-500 truncate max-w-xs text-right">{stat.message}</span>
+                        <span className={stat.ok ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold'}>
+                          {stat.ok ? '✓' : '✗'}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+
+                  {systemStatus.kind.clusters.length > 0 && (
+                    <div className="rounded border border-zinc-800 px-4 py-3 text-xs">
+                      <span className="text-zinc-600">kind clusters: </span>
+                      <span className="text-zinc-300">{systemStatus.kind.clusters.join(', ')}</span>
                     </div>
                   )}
                 </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </section>
+              )}
 
-      {failureAnalysis && (
-        <section className="mt-8 rounded-xl border border-amber-200 bg-amber-50/80 p-6 shadow-sm">
-          <h2 className="mb-3 text-lg font-medium text-amber-950">Deployment Failure Analysis</h2>
-          <p className="text-sm text-amber-950">
-            {String(failureAnalysis.likely_cause ?? failureAnalysis.failure ?? 'No failure analysis available.')}
-          </p>
-          <p className="mt-2 text-sm text-amber-900">
-            Suggested fix: {String(failureAnalysis.suggested_fix ?? 'Review rollout status, pod logs, and smoke-test output.')}
-          </p>
-        </section>
-      )}
+              <button
+                onClick={() => getSystemStatus().then(setSystemStatus).catch(() => undefined)}
+                className="rounded border border-zinc-700 px-4 py-2 text-xs text-zinc-400 hover:bg-zinc-800"
+              >
+                Refresh Status
+              </button>
+
+              <SectionTitle>About CodeDeck</SectionTitle>
+              <div className="space-y-2 rounded border border-zinc-800 bg-zinc-900/60 p-4 text-xs text-zinc-400">
+                <div><span className="text-zinc-300">Version:</span> Midsem Milestone</div>
+                <div><span className="text-zinc-300">Stack:</span> FastAPI · PostgreSQL · React · Vite · kind</div>
+                <div><span className="text-zinc-300">AI:</span> OpenAI GPT-4.1-mini · Local hash embeddings</div>
+                <div className="pt-2 border-t border-zinc-800 text-zinc-600">
+                  Current scope: GitHub → Analysis → RAG → Q&amp;A → AI Testing → Docker → Kubernetes (kind) → Smoke Test
+                </div>
+                <div className="text-zinc-700">
+                  Future scope: CI/CD · Cloud Kubernetes · Security scanning · Observability · Blue-Green
+                </div>
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
     </div>
   )
 }

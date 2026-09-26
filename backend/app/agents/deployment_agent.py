@@ -15,13 +15,16 @@ logger = logging.getLogger("deploymind")
 
 
 def _prepare_deployment_source(project_id: int, repository_url: str, dest: Path) -> Path:
+    cleanup_repository(dest)
     cached_src = Path(settings.workspace_dir) / f"project_{project_id}"
     if cached_src.is_dir():
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(cached_src, dest)
-        logger.info("Reused local repository cache from %s for project %d deployment", cached_src, project_id)
-        return dest
+        try:
+            shutil.copytree(cached_src, dest)
+            logger.info("Reused local repository cache from %s for project %d deployment", cached_src, project_id)
+            return dest
+        except Exception as exc:
+            logger.warning("Failed to copy cached repository (%s); re-cloning...", exc)
+            cleanup_repository(dest)
     return clone_repository(repository_url, dest)
 
 

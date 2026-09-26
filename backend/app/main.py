@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
-from app.api import analysis, deployments, projects
+from app.api import analysis, deployments, projects, system
 from app.core.config import settings
 from app.db.database import init_db
 
@@ -30,7 +30,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="DeployMind", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="CodeDeck", version="0.1.0", lifespan=lifespan)
 
 origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 if not origins:
@@ -47,6 +47,7 @@ app.add_middleware(
 app.include_router(projects.router)
 app.include_router(analysis.router)
 app.include_router(deployments.router)
+app.include_router(system.router)
 
 
 @app.get("/")

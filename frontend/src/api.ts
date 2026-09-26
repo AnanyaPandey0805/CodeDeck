@@ -6,10 +6,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     ? { ...(options?.headers ?? {}) }
     : { 'Content-Type': 'application/json', ...(options?.headers ?? {}) };
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers,
-    ...options,
-  });
+  const res = await fetch(`${API_BASE}${path}`, { headers, ...options });
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -18,9 +15,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(msg);
   }
 
-  if (res.status === 204 || res.headers.get('content-length') === '0') {
-    return {} as T;
-  }
+  if (res.status === 204 || res.headers.get('content-length') === '0') return {} as T;
   return res.json().catch(() => ({} as T));
 }
 
@@ -54,47 +49,7 @@ export type PipelineStep = {
   completed_at: string | null;
 };
 
-export function getHealth() {
-  return request<{ status: string; service: string }>('/health');
-}
-
-export function listProjects() {
-  return request<Project[]>('/api/projects');
-}
-
-export function createProject(repository_url: string) {
-  return request<Project>('/api/projects', {
-    method: 'POST',
-    body: JSON.stringify({ repository_url }),
-  });
-}
-
-export function startAnalysis(projectId: number) {
-  return request<Analysis>(`/api/projects/${projectId}/analyze`, {
-    method: 'POST',
-  });
-}
-
-export function getAnalysis(projectId: number) {
-  return request<Analysis | null>(`/api/projects/${projectId}/analysis`);
-}
-
-export function getPipeline(projectId: number) {
-  return request<PipelineStep[]>(`/api/projects/${projectId}/pipeline`);
-}
-
-export function getProject(projectId: number) {
-  return request<Project>(`/api/projects/${projectId}`);
-}
-
-export type GeneratedFile = {
-  filename: string;
-  content: string;
-};
-
-export function getFiles(projectId: number) {
-  return request<GeneratedFile[]>(`/api/projects/${projectId}/files`);
-}
+export type GeneratedFile = { filename: string; content: string };
 
 export type SearchSource = {
   path: string;
@@ -109,13 +64,6 @@ export type RepositoryAnswer = {
   answer: string;
   sources: SearchSource[];
 };
-
-export function askRepositoryQuestion(projectId: number, question: string) {
-  return request<RepositoryAnswer>(`/api/projects/${projectId}/qa`, {
-    method: 'POST',
-    body: JSON.stringify({ question }),
-  });
-}
 
 export type EvaluationItem = {
   question: string;
@@ -132,16 +80,7 @@ export type Evaluation = {
   results: EvaluationItem[];
 };
 
-export function getEvaluation(projectId: number) {
-  return request<Evaluation>(`/api/projects/${projectId}/evaluation`);
-}
-
-export type GeneratedTestCase = {
-  name: string;
-  rationale: string;
-  path: string;
-  code: string;
-};
+export type GeneratedTestCase = { name: string; rationale: string; path: string; code: string };
 
 export type GeneratedTestRun = {
   status: string;
@@ -153,12 +92,6 @@ export type GeneratedTestRun = {
   failure_analysis: Record<string, unknown> | null;
 };
 
-export function runAiTests(projectId: number) {
-  return request<GeneratedTestRun>(`/api/projects/${projectId}/ai-tests`, {
-    method: 'POST',
-  });
-}
-
 export type Deployment = {
   id: number;
   environment: string;
@@ -169,41 +102,28 @@ export type Deployment = {
   created_at: string;
 };
 
-export function deployStaging(projectId: number) {
-  return request<{
-    status: string;
-    message: string;
-    deployment?: Deployment;
-    details?: Record<string, unknown>;
-  }>(`/api/projects/${projectId}/deploy/staging`, { method: 'POST' });
-}
+export type SystemStatus = {
+  backend: { ok: boolean; message: string };
+  database: { ok: boolean; message: string };
+  docker: { ok: boolean; message: string };
+  kind: { ok: boolean; available: boolean; clusters: string[]; message: string };
+  kubectl: { ok: boolean; message: string };
+};
 
-export function deployProduction(projectId: number) {
-  return request<{
-    status: string;
-    message: string;
-    deployment?: Deployment;
-    details?: Record<string, unknown>;
-  }>(`/api/projects/${projectId}/deploy/production`, { method: 'POST' });
-}
-
-export function approveProduction(projectId: number) {
-  return request<{
-    status: string;
-    message: string;
-    deployment?: Deployment;
-  }>(`/api/projects/${projectId}/deploy/production/approve`, { method: 'POST' });
-}
-
-export function rollbackProduction(projectId: number) {
-  return request<{
-    status: string;
-    message: string;
-    deployment?: Deployment;
-  }>(`/api/projects/${projectId}/rollback`, { method: 'POST' });
-}
-
-export function listDeployments(projectId: number) {
-  return request<Deployment[]>(`/api/projects/${projectId}/deployments`);
-}
-
+export const getHealth = () => request<{ status: string; service: string }>('/health');
+export const getSystemStatus = () => request<SystemStatus>('/api/system/status');
+export const listProjects = () => request<Project[]>('/api/projects');
+export const createProject = (repository_url: string) => request<Project>('/api/projects', { method: 'POST', body: JSON.stringify({ repository_url }) });
+export const getProject = (id: number) => request<Project>(`/api/projects/${id}`);
+export const startAnalysis = (id: number) => request<Analysis>(`/api/projects/${id}/analyze`, { method: 'POST' });
+export const getAnalysis = (id: number) => request<Analysis | null>(`/api/projects/${id}/analysis`);
+export const getPipeline = (id: number) => request<PipelineStep[]>(`/api/projects/${id}/pipeline`);
+export const getFiles = (id: number) => request<GeneratedFile[]>(`/api/projects/${id}/files`);
+export const askRepositoryQuestion = (id: number, question: string) => request<RepositoryAnswer>(`/api/projects/${id}/qa`, { method: 'POST', body: JSON.stringify({ question }) });
+export const getEvaluation = (id: number) => request<Evaluation>(`/api/projects/${id}/evaluation`);
+export const runAiTests = (id: number) => request<GeneratedTestRun>(`/api/projects/${id}/ai-tests`, { method: 'POST' });
+export const deployStaging = (id: number) => request<{ status: string; message: string }>(`/api/projects/${id}/deploy/staging`, { method: 'POST' });
+export const deployProduction = (id: number) => request<{ status: string; message: string }>(`/api/projects/${id}/deploy/production`, { method: 'POST' });
+export const approveProduction = (id: number) => request<{ status: string; message: string }>(`/api/projects/${id}/deploy/production/approve`, { method: 'POST' });
+export const rollbackProduction = (id: number) => request<{ status: string; message: string }>(`/api/projects/${id}/rollback`, { method: 'POST' });
+export const listDeployments = (id: number) => request<Deployment[]>(`/api/projects/${id}/deployments`);

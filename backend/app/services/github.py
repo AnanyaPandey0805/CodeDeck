@@ -1,6 +1,8 @@
 import logging
+import os
 import re
 import shutil
+import stat
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -40,6 +42,23 @@ def _clone_url(url: str) -> str:
     return f"https://x-access-token:{settings.github_token}@{parsed.netloc}{parsed.path}.git"
 
 
+def _handle_remove_readonly(func, path, exc_info):
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        pass
+
+
+def cleanup_repository(path: Path) -> None:
+    path = Path(path)
+    if path.exists():
+        try:
+            shutil.rmtree(path, onerror=_handle_remove_readonly)
+        except Exception:
+            shutil.rmtree(path, ignore_errors=True)
+
+
 def clone_repository(url: str, dest: Path) -> Path:
     url = validate_github_url(url)
     dest = dest.resolve()
@@ -47,8 +66,7 @@ def clone_repository(url: str, dest: Path) -> Path:
     if not str(dest).startswith(str(workspace)):
         raise ValueError("Clone destination is outside workspace")
 
-    if dest.exists():
-        shutil.rmtree(dest)
+    cleanup_repository(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -62,6 +80,7 @@ def clone_repository(url: str, dest: Path) -> Path:
                 except Exception as e:
                     logger.warning("Failed to sanitize requirements.txt at %s: %s", req_path, e)
     except GitCommandError as exc:
+        cleanup_repository(dest)
         msg = str(exc)
         if settings.github_token:
             msg = msg.replace(settings.github_token, "***")
@@ -69,9 +88,3 @@ def clone_repository(url: str, dest: Path) -> Path:
 
     logger.info("repository cloned to %s", dest)
     return dest
-
-
-def cleanup_repository(path: Path) -> None:
-    path = Path(path)
-    if path.exists():
-        shutil.rmtree(path, ignore_errors=True)
