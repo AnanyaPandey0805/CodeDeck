@@ -85,6 +85,7 @@ class RepositoryAnswerOut(BaseModel):
     question: str
     answer: str
     sources: list[SearchSourceOut]
+    provider: str | None = None
 
 
 class EvaluationItemOut(BaseModel):
@@ -109,6 +110,12 @@ class GeneratedTestCaseOut(BaseModel):
     code: str
 
 
+class TestInferenceOut(BaseModel):
+    name: str
+    target: str
+    inference: str
+
+
 class GeneratedTestRunOut(BaseModel):
     status: str
     message: str
@@ -117,3 +124,4 @@ class GeneratedTestRunOut(BaseModel):
     stdout: str = ""
     stderr: str = ""
     failure_analysis: dict | None = None
+    test_inferences: list[TestInferenceOut] = []

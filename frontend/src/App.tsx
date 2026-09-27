@@ -617,7 +617,14 @@ export default function App() {
                     <div className="flex flex-1 gap-4 overflow-hidden">
                       <div className="flex-1 overflow-y-auto space-y-3">
                         <div className="rounded border border-zinc-700 bg-zinc-900/60 p-4">
-                          <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-2">Answer</div>
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="text-[10px] uppercase tracking-widest text-zinc-500 font-semibold">Answer</div>
+                            {qaResult.provider && (
+                              <span className="rounded bg-sky-950/80 border border-sky-800/60 px-2 py-0.5 text-[10px] text-sky-300 font-mono">
+                                Engine: {qaResult.provider}
+                              </span>
+                            )}
+                          </div>
                           <p className="text-sm leading-relaxed text-zinc-200">{qaResult.answer}</p>
                         </div>
                         {qaResult.sources.length > 0 && (
@@ -778,16 +785,80 @@ export default function App() {
 
                   {aiTests && (
                     <div className="space-y-4">
-                      <div className="flex items-center gap-3 rounded border border-zinc-700 bg-zinc-900/60 px-4 py-3 text-xs">
+                      <div className={`flex items-center gap-3 rounded border px-4 py-3 text-xs ${
+                        aiTests.status === 'passed' ? 'border-emerald-700/50 bg-emerald-950/20' :
+                        aiTests.status === 'skipped' ? 'border-zinc-700 bg-zinc-900/60' :
+                        'border-red-700/50 bg-red-950/20'
+                      }`}>
                         <span className={
                           aiTests.status === 'passed' ? 'text-emerald-400 font-bold' :
                           aiTests.status === 'skipped' ? 'text-zinc-500' : 'text-red-400 font-bold'
                         }>
                           {aiTests.status === 'passed' ? '✓ PASSED' : aiTests.status === 'skipped' ? '○ SKIPPED' : '✗ FAILED'}
                         </span>
-                        <span className="text-zinc-300">{aiTests.message}</span>
-                        {aiTests.command && <span className="ml-auto text-zinc-600 font-mono">{aiTests.command}</span>}
+                        <span className="text-zinc-300 font-medium">{aiTests.message}</span>
+                        {aiTests.command && <span className="ml-auto text-zinc-500 font-mono text-[11px]">{aiTests.command}</span>}
                       </div>
+
+                      {/* Test Inferences */}
+                      {aiTests.test_inferences && aiTests.test_inferences.length > 0 && (
+                        <div className="rounded border border-zinc-700 bg-zinc-900/60 p-4 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <div className="text-[10px] uppercase tracking-widest text-sky-400 font-semibold">
+                              What These Tests Infer About The Codebase
+                            </div>
+                            <span className="text-[10px] text-zinc-500 font-mono">
+                              {aiTests.test_inferences.length} specs inferred
+                            </span>
+                          </div>
+                          <div className="space-y-2">
+                            {aiTests.test_inferences.map(inf => (
+                              <div key={inf.name + inf.target} className="rounded border border-zinc-800 bg-zinc-950/60 p-2.5 text-xs">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="rounded bg-sky-950 border border-sky-800/60 px-1.5 py-0.5 text-[10px] font-mono text-sky-300">
+                                    {inf.target}
+                                  </span>
+                                  <span className="font-medium text-zinc-200">{inf.name}</span>
+                                </div>
+                                <p className="text-zinc-400 text-[11px] leading-relaxed">{inf.inference}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* AI Failure Analysis & Suggested Remediation */}
+                      {aiTests.failure_analysis && (
+                        <div className="rounded border border-red-700/40 bg-red-950/20 p-4 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <div className="text-[10px] uppercase tracking-widest text-red-400 font-semibold">
+                              Failure Diagnostics &amp; Suggested Remediation
+                            </div>
+                            {Boolean(aiTests.failure_analysis.category) && (
+                              <span className="rounded bg-red-900/60 border border-red-700/60 px-2 py-0.5 text-[10px] font-mono text-red-200">
+                                {String(aiTests.failure_analysis.category)}
+                              </span>
+                            )}
+                          </div>
+                          <div className="space-y-2 text-xs">
+                            <div>
+                              <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">Likely Root Cause</div>
+                              <p className="text-red-200 leading-relaxed font-sans text-xs bg-red-950/40 p-2.5 rounded border border-red-900/30 whitespace-pre-line">
+                                {String(aiTests.failure_analysis.likely_cause ?? 'No analysis provided')}
+                              </p>
+                            </div>
+                            {Boolean(aiTests.failure_analysis.suggested_fix) && (
+                              <div>
+                                <div className="text-[10px] uppercase tracking-widest text-emerald-500 mb-1">Suggested Fix</div>
+                                <div className="text-emerald-300 bg-emerald-950/30 p-2.5 rounded border border-emerald-900/40 leading-relaxed font-sans text-xs flex gap-2 items-start">
+                                  <span className="text-emerald-400 font-bold shrink-0">→</span>
+                                  <span>{String(aiTests.failure_analysis.suggested_fix)}</span>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
 
                       {aiTests.generated_tests.map(tc => (
                         <div key={tc.path} className="space-y-2">
@@ -807,18 +878,6 @@ export default function App() {
                             <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-1">stderr</div>
                             <TerminalBlock text={aiTests.stderr || 'No output'} maxH="10rem" />
                           </div>
-                        </div>
-                      )}
-
-                      {aiTests.failure_analysis && (
-                        <div className="rounded border border-orange-700/30 bg-orange-950/20 p-4 text-xs">
-                          <div className="text-[10px] uppercase tracking-widest text-orange-500 mb-2">AI Failure Analysis</div>
-                          <p className="text-orange-200">{String(aiTests.failure_analysis.likely_cause ?? 'No analysis')}</p>
-                          {Boolean(aiTests.failure_analysis.suggested_fix) && (
-                            <p className="mt-2 text-orange-300/70">
-                              → {String(aiTests.failure_analysis.suggested_fix)}
-                            </p>
-                          )}
                         </div>
                       )}
                     </div>
@@ -1191,6 +1250,29 @@ export default function App() {
               >
                 Refresh Status
               </button>
+
+              <SectionTitle>AI &amp; RAG Engine</SectionTitle>
+              <div className="space-y-3 rounded border border-zinc-800 bg-zinc-900/60 p-4 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">Active LLM Provider</span>
+                  <span className="font-mono text-zinc-200 font-semibold">
+                    {systemStatus?.ai_provider?.provider ?? 'Grounded Heuristic'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">Active Model</span>
+                  <span className="font-mono text-zinc-400">
+                    {systemStatus?.ai_provider?.model ?? 'rule-based-engine'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">RAG Vector Index</span>
+                  <span className="font-mono text-zinc-400">192-dim Normalized Cosine Retrieval</span>
+                </div>
+                <div className="pt-2 border-t border-zinc-800/80 text-zinc-500 leading-relaxed text-[11px]">
+                  DeployMind supports dual-provider LLM fallback: it prioritizes <strong className="text-zinc-300">OpenAI</strong> (gpt-4.1-mini) and seamlessly falls back to <strong className="text-zinc-300">xAI Grok</strong> (grok-2-latest) via <code className="text-sky-300 font-mono">GROK_API_KEY</code> if OpenAI is unavailable or rate-limited. Offline grounded heuristics remain available if neither key is configured.
+                </div>
+              </div>
 
               <SectionTitle>About CodeDeck</SectionTitle>
               <div className="space-y-2 rounded border border-zinc-800 bg-zinc-900/60 p-4 text-xs text-zinc-400">

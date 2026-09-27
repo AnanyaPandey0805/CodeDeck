@@ -6,6 +6,7 @@ from fastapi import APIRouter
 from sqlalchemy import text
 
 from app.db.database import SessionLocal
+from app.services.repository_ai import get_active_ai_provider
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 logger = logging.getLogger("deploymind")
@@ -82,4 +83,5 @@ def system_status():
             "ok": kubectl_ok,
             "message": "Available" if kubectl_ok else kubectl_msg,
         },
+        "ai_provider": get_active_ai_provider(),
     }

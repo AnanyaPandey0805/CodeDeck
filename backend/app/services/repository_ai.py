@@ -20,6 +20,7 @@ from app.core.prompts import (
     DEPLOYMENT_RECOMMENDATION_PROMPT,
     FAILURE_ANALYSIS_PROMPT,
     RAG_QA_PROMPT,
+    TEST_FAILURE_PROMPT,
     TEST_GENERATION_PROMPT,
 )
 from app.services.dependency_sanitizer import sanitize_requirements_file
@@ -93,7 +94,7 @@ SKIP_DIRS = {
     ".idea",
     ".vscode",
 }
-TEST_BLOCKED_ENV = {"OPENAI_API_KEY", "GITHUB_TOKEN", "GHCR_TOKEN", "DATABASE_URL"}
+TEST_BLOCKED_ENV = {"OPENAI_API_KEY", "GROK_API_KEY", "XAI_API_KEY", "GITHUB_TOKEN", "GHCR_TOKEN"}
 
 
 class RepositoryChunk(BaseModel):
@@ -126,6 +127,7 @@ class RepositoryAnswer(BaseModel):
     question: str
     answer: str
     sources: list[SearchResult] = Field(default_factory=list)
+    provider: str = "heuristic"
 
 
 class DeploymentRecommendation(BaseModel):
@@ -158,6 +160,12 @@ class GeneratedTestCase(BaseModel):
     code: str
 
 
+class TestInference(BaseModel):
+    name: str
+    target: str
+    inference: str
+
+
 class AITestRun(BaseModel):
     status: str
     message: str
@@ -166,6 +174,7 @@ class AITestRun(BaseModel):
     stdout: str = ""
     stderr: str = ""
     failure_analysis: dict | None = None
+    test_inferences: list[TestInference] = Field(default_factory=list)
 
 
 def _workspace_generated_dir(project_id: int) -> Path:
@@ -360,25 +369,72 @@ def search_repository(project_id: int, query: str, limit: int = 4) -> list[Searc
     return deduped
 
 
-def _safe_chat(prompt: str) -> str | None:
-    if not settings.openai_api_key:
-        return None
-    try:
-        client = OpenAI(api_key=settings.openai_api_key)
-        res = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            temperature=0.2,
-            messages=[
-                {"role": "system", "content": "You are a grounded repository assistant. Answer only from provided evidence."},
-                {"role": "user", "content": prompt},
-            ],
-        )
-        text = res.choices[0].message.content if res.choices else None
-        if isinstance(text, str):
-            return text.strip()
-    except Exception:
-        logger.warning("openai completion failed", exc_info=True)
-    return None
+def get_active_ai_provider() -> dict[str, str]:
+    openai_key = (settings.openai_api_key or "").strip()
+    if openai_key and not openai_key.startswith("sk-abcdef") and not openai_key.startswith("sk-dummy"):
+        return {"provider": "OpenAI", "model": getattr(settings, "openai_model", "gpt-4.1-mini"), "status": "active"}
+
+    grok_key = (getattr(settings, "grok_api_key", "") or getattr(settings, "xai_api_key", "") or "").strip()
+    if grok_key and not grok_key.startswith("xai-dummy"):
+        return {"provider": "xAI Grok", "model": getattr(settings, "grok_model", "grok-2-latest"), "status": "active"}
+
+    return {"provider": "Grounded Heuristic", "model": "rule-based-engine", "status": "offline_fallback"}
+
+
+def _safe_chat_with_provider(
+    prompt: str,
+    system_prompt: str = "You are a grounded repository assistant. Answer only from provided evidence.",
+) -> tuple[str | None, str]:
+    """Attempts completion with OpenAI first, falls back to xAI Grok, or returns None and 'heuristic'."""
+    # 1. Try OpenAI if key is configured and not placeholder
+    openai_key = (settings.openai_api_key or "").strip()
+    if OpenAI and openai_key and not openai_key.startswith("sk-abcdef") and not openai_key.startswith("sk-dummy"):
+        try:
+            client = OpenAI(api_key=openai_key)
+            res = client.chat.completions.create(
+                model=getattr(settings, "openai_model", "gpt-4.1-mini"),
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            text = res.choices[0].message.content if res.choices else None
+            if isinstance(text, str) and text.strip():
+                return text.strip(), "OpenAI (gpt-4.1-mini)"
+        except Exception as e:
+            logger.warning("OpenAI completion failed (%s), attempting secondary provider fallback", e)
+
+    # 2. Try xAI Grok if key is configured (or if OpenAI failed)
+    grok_key = (getattr(settings, "grok_api_key", "") or getattr(settings, "xai_api_key", "") or "").strip()
+    if OpenAI and grok_key and not grok_key.startswith("xai-dummy"):
+        try:
+            base_url = getattr(settings, "grok_base_url", "https://api.x.ai/v1")
+            model = getattr(settings, "grok_model", "grok-2-latest")
+            client = OpenAI(api_key=grok_key, base_url=base_url)
+            res = client.chat.completions.create(
+                model=model,
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            text = res.choices[0].message.content if res.choices else None
+            if isinstance(text, str) and text.strip():
+                return text.strip(), f"xAI Grok ({model})"
+        except Exception as e:
+            logger.warning("xAI Grok completion failed (%s)", e)
+
+    return None, "Grounded Heuristic Fallback"
+
+
+def _safe_chat(
+    prompt: str,
+    system_prompt: str = "You are a grounded repository assistant. Answer only from provided evidence.",
+) -> str | None:
+    text, _ = _safe_chat_with_provider(prompt, system_prompt=system_prompt)
+    return text
 
 
 def _detect_database(chunks: list[RepositoryChunk]) -> str | None:
@@ -499,8 +555,11 @@ def answer_repository_question(project_id: int, question: str, analysis: dict) -
         f"Detected analysis: {json.dumps(signals, indent=2)}\n\n"
         f"Retrieved snippets:\n{source_block}"
     )
-    answer = _safe_chat(prompt) or _heuristic_answer(question, analysis, signals, sources)
-    return RepositoryAnswer(question=question, answer=answer, sources=sources)
+    answer_text, provider = _safe_chat_with_provider(prompt)
+    if not answer_text:
+        answer_text = _heuristic_answer(question, analysis, signals, sources)
+        provider = "Heuristic Analysis"
+    return RepositoryAnswer(question=question, answer=answer_text, sources=sources, provider=provider)
 
 
 def generate_deployment_recommendation(project_id: int, analysis: dict) -> DeploymentRecommendation:
@@ -627,23 +686,104 @@ def _route_candidates(project_id: int) -> list[str]:
     return ordered[:4]
 
 
+def _clean_route(route: str) -> str:
+    """Replaces path parameters like {user_id} or :id with concrete dummy values."""
+    cleaned = re.sub(r"\{[a-zA-Z0-9_]+_id\}", "1", route)
+    cleaned = re.sub(r"\{id\}", "1", cleaned)
+    cleaned = re.sub(r"\{[a-zA-Z0-9_]+\}", "test", cleaned)
+    cleaned = re.sub(r":[a-zA-Z0-9_]+", "1", cleaned)
+    if not cleaned.startswith("/"):
+        cleaned = "/" + cleaned
+    return cleaned
+
+
+def _generate_test_inferences(framework: str, routes: list[str]) -> list[TestInference]:
+    inferences: list[TestInference] = [
+        TestInference(
+            name="Service Root Reachability",
+            target="/",
+            inference="Verifies the root endpoint handles incoming HTTP GET requests without unhandled 5xx server exceptions.",
+        )
+    ]
+    if framework == "FastAPI":
+        inferences.append(
+            TestInference(
+                name="OpenAPI Schema Serialization",
+                target="/openapi.json",
+                inference="Infers that all API route definitions, Pydantic schemas, and type annotations successfully compile and serialize into valid OpenAPI 3.0 specification.",
+            )
+        )
+        inferences.append(
+            TestInference(
+                name="Interactive Documentation Availability",
+                target="/docs",
+                inference="Infers that Swagger UI interactive documentation is correctly mounted and accessible for developers and API consumers.",
+            )
+        )
+
+    for i, route in enumerate(routes[:4], start=1):
+        if "health" in route.lower():
+            inferences.append(
+                TestInference(
+                    name="Health Probe Liveness",
+                    target=route,
+                    inference="Infers application liveness and readiness probe response for Kubernetes deployment health monitoring.",
+                )
+            )
+        else:
+            inferences.append(
+                TestInference(
+                    name=f"Route Check #{i} ({route})",
+                    target=route,
+                    inference=f"Verifies that route '{route}' handles GET requests without raising unhandled 5xx server errors.",
+                )
+            )
+    return inferences
+
+
 def _python_test_file(framework: str, module_name: str, app_attr: str, routes: list[str]) -> str:
     checked = routes[:4] or ["/", "/health"]
-    if framework == "Flask":
-        checks = "\n\n".join(
-            f"def test_{i}_route(client):\n    response = client.get({route!r})\n    assert response.status_code < 500\n"
-            for i, route in enumerate(checked, start=1)
+    route_checks: list[str] = []
+    for i, route in enumerate(checked, start=1):
+        clean = _clean_route(route)
+        route_checks.append(
+            f"def test_{i}_route(client):\n"
+            f'    """Infers route {clean} handles GET requests gracefully."""\n'
+            f"    response = client.get({clean!r})\n"
+            f"    assert response.status_code < 500, f'Route returned internal server error: {{response.status_code}}'\n"
         )
-        return f"""import sys
+    if framework == "FastAPI":
+        route_checks.append(
+            "def test_openapi_schema(client):\n"
+            '    """Infers OpenAPI schema compiles cleanly without model errors."""\n'
+            '    response = client.get("/openapi.json")\n'
+            '    assert response.status_code in {200, 404}\n'
+            '    if response.status_code == 200:\n'
+            '        assert "openapi" in response.json() or "paths" in response.json()\n'
+        )
+
+    checks = "\n\n".join(route_checks)
+
+    if framework == "Flask":
+        return f"""import os
+import sys
 from pathlib import Path
+
+# Injected mock environment variables so Pydantic settings & DB engines do not crash
+os.environ.setdefault("TESTING", "True")
+os.environ.setdefault("ENVIRONMENT", "test")
+os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+os.environ.setdefault("SQLALCHEMY_DATABASE_URI", "sqlite:///:memory:")
+os.environ.setdefault("SECRET_KEY", "deploymind-test-secret-key-32chars-min-length!")
+os.environ.setdefault("PROJECT_NAME", "DeployMind-TestApp")
+
+ROOT = Path(__file__).resolve().parents[1]
+for parent in [ROOT, ROOT.parent, ROOT / "src", ROOT / "app"]:
+    if parent.is_dir() and str(parent) not in sys.path:
+        sys.path.insert(0, str(parent))
 
 import pytest
 from {module_name} import {app_attr}
-
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 
 @pytest.fixture
@@ -655,35 +795,62 @@ def client():
 {checks}
 """
 
-    checks = "\n\n".join(
-        f"def test_{i}_route(client):\n    response = client.get({route!r})\n    assert response.status_code < 500\n"
-        for i, route in enumerate(checked, start=1)
-    )
-    return f"""import sys
+    return f"""import os
+import sys
 from pathlib import Path
+
+# Injected mock environment variables so Pydantic settings & DB engines do not crash
+os.environ.setdefault("TESTING", "True")
+os.environ.setdefault("ENVIRONMENT", "test")
+os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+os.environ.setdefault("SQLALCHEMY_DATABASE_URI", "sqlite:///:memory:")
+os.environ.setdefault("SECRET_KEY", "deploymind-test-secret-key-32chars-min-length!")
+os.environ.setdefault("PROJECT_NAME", "DeployMind-TestApp")
+
+ROOT = Path(__file__).resolve().parents[1]
+for parent in [ROOT, ROOT.parent, ROOT / "backend", ROOT / "src", ROOT / "app"]:
+    if parent.is_dir() and str(parent) not in sys.path:
+        sys.path.insert(0, str(parent))
 
 import pytest
 from fastapi.testclient import TestClient
-
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
 from {module_name} import {app_attr}
 
 
 @pytest.fixture
 def client():
-    return TestClient({app_attr})
+    # Use raise_server_exceptions=False so routes returning 500 don't abort pytest execution prematurely
+    return TestClient({app_attr}, raise_server_exceptions=False)
 
 
 {checks}
 """
 
 
-def _child_env() -> dict[str, str]:
-    return {k: v for k, v in os.environ.items() if k not in TEST_BLOCKED_ENV}
+def _child_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in TEST_BLOCKED_ENV}
+    mock_defaults = {
+        "TESTING": "True",
+        "ENVIRONMENT": "test",
+        "DATABASE_URL": "sqlite:///:memory:",
+        "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
+        "SECRET_KEY": "deploymind-test-secret-key-32chars-min-length!",
+        "FIRST_SUPERUSER": "admin@example.com",
+        "FIRST_SUPERUSER_PASSWORD": "testpassword123",
+        "PROJECT_NAME": "DeployMind-TestApp",
+        "POSTGRES_SERVER": "localhost",
+        "POSTGRES_USER": "test",
+        "POSTGRES_PASSWORD": "test",
+        "POSTGRES_DB": "test",
+        "EMAILS_ENABLED": "False",
+        "USERS_OPEN_REGISTRATION": "False",
+    }
+    for k, v in mock_defaults.items():
+        if k not in env:
+            env[k] = v
+    if extra_env:
+        env.update(extra_env)
+    return env
 
 
 def _run_install(command: str, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -706,68 +873,96 @@ def _minimal_python_test_dependencies(framework: str) -> str:
 
 def _prepare_python_repo(repo_dir: Path, timeout: int, framework: str = "") -> str | None:
     install_cmds: list[str] = []
-    # Look for requirements.txt or pyproject.toml in repo_dir or its parent
     req = repo_dir / "requirements.txt"
     pyproject = repo_dir / "pyproject.toml"
     if not req.exists() and not pyproject.exists():
-        # Also check one level up (when repo_dir is backend/ inside a monorepo)
         req = repo_dir.parent / "requirements.txt"
         pyproject = repo_dir.parent / "pyproject.toml"
+
+    minimal_cmd = _minimal_python_test_dependencies(framework)
+
     if req.exists():
-        install_cmds.append(f"pip install -r {req} pytest -q")
+        install_cmds.append(f"pip install -r {req} -q")
     elif pyproject.exists():
-        install_cmds.append(f"pip install {pyproject.parent} pytest -q")
+        install_cmds.append(f"pip install {pyproject.parent} -q")
 
-    if framework in {"FastAPI", "Flask"}:
-        install_cmds.append(_minimal_python_test_dependencies(framework))
+    # Attempt repository requirements install
+    for command in install_cmds:
+        try:
+            proc = _run_install(command, repo_dir, timeout=min(timeout, 120))
+            if proc.returncode != 0:
+                logger.warning("Repository dependencies partial failure: %s", (proc.stderr or proc.stdout)[:200])
+        except subprocess.TimeoutExpired:
+            logger.warning("Repository dependencies install timed out, falling back to minimal runner")
 
-    if not install_cmds:
-        return None
-
-    errors: list[str] = []
+    # Guarantee minimal test dependencies exist so testing is seamless
     try:
-        for command in install_cmds:
-            proc = _run_install(command, repo_dir, timeout)
-            if proc.returncode == 0:
-                return None
-            errors.append((proc.stderr or proc.stdout or f"Install failed: {command}")[:4000])
-    except subprocess.TimeoutExpired:
-        return "Dependency install timed out"
-    return "\n\n".join(errors)[-4000:]
+        proc = _run_install(minimal_cmd, repo_dir, timeout=60)
+        if proc.returncode == 0:
+            return None
+        return proc.stderr or proc.stdout or "Failed to install test runner dependencies"
+    except Exception as e:
+        return str(e)
 
 
-def explain_failure(error: str, evidence: list[str] | None = None) -> dict:
+def explain_failure(error: str, evidence: list[str] | None = None, command: str | None = None) -> dict:
     evidence = evidence or []
     text = " ".join(evidence + [error]).lower()
-    if "kubernetes cluster not reachable" in text or "kind create cluster" in text or "no kind clusters found" in text:
-        cause = "DeployMind could not reach the local kind Kubernetes cluster."
-        fix = f"Start or create the cluster first with: kind create cluster --name {settings.kind_cluster_name}"
-    elif "no module named 'app'" in text or 'no module named "app"' in text:
-        cause = "The generated test ran from the wrong import root for the repository layout."
-        fix = "Retry after using the repository root or backend root as the Python import path for generated tests."
+    category = "GENERAL_FAILURE"
+
+    if "pydantic" in text and ("validation error" in text or "field required" in text or "validationerror" in text):
+        category = "SETTINGS_VALIDATION"
+        cause = "The application failed to initialize because required configuration settings or environment variables were missing."
+        fix = "Configure required environment variables (e.g. SECRET_KEY, DATABASE_URL, FIRST_SUPERUSER) in the test environment or .env file."
+    elif "no module named" in text or "modulenotfounderror" in text or "importerror" in text:
+        category = "IMPORT_ERROR"
+        cause = "The generated test ran from an unexpected Python import path, or a repository module was missing."
+        fix = "Verify the repository layout and make sure dependencies are listed in requirements.txt or pyproject.toml."
     elif "could not find a version that satisfies the requirement" in text or "no matching distribution found" in text:
+        category = "DEPENDENCY_INSTALL_FAILED"
         cause = "Repository dependency installation failed before the generated tests could run."
         fix = "Check the repository dependency file for invalid or private-only packages, then retry the AI-generated tests."
     elif "crashloopbackoff" in text or "module not found" in text:
+        category = "CRASH_LOOP"
         cause = "The application is starting but crashing during boot."
         fix = "Check the entrypoint module, dependency installation, and startup logs."
     elif "imagepullbackoff" in text or "errimagepull" in text:
+        category = "IMAGE_PULL_FAILED"
         cause = "Kubernetes could not start the image that was built or loaded."
         fix = "Verify the Docker build succeeded and that the image was loaded into the kind cluster."
     elif "port-forward exited early" in text or "connection refused" in text:
+        category = "PORT_FORWARD_OR_REFUSED"
         cause = "The service became reachable before the application was actually ready, or the wrong port is exposed."
         fix = "Confirm the container port, readiness behavior, and health endpoint path."
     elif "database" in text or "postgres" in text or "sql" in text:
+        category = "DATABASE_UNAVAILABLE"
         cause = "The deployment likely depends on a database configuration that is missing or unreachable."
         fix = "Check database environment variables, secrets, and network access."
+    elif "kubernetes cluster not reachable" in text or "kind create cluster" in text or "no kind clusters found" in text:
+        category = "CLUSTER_UNREACHABLE"
+        cause = "DeployMind could not reach the local kind Kubernetes cluster."
+        fix = f"Start or create the cluster first with: kind create cluster --name {settings.kind_cluster_name}"
+    elif "401" in text or "unauthorized" in text or "not authenticated" in text:
+        category = "AUTHENTICATION_REQUIRED"
+        cause = "The tested route returned 401 Unauthorized because it requires authentication credentials or an active session."
+        fix = "Add test client authentication headers (e.g. headers={'Authorization': 'Bearer token'}) or mock the auth dependency."
+    elif "422" in text or "unprocessable entity" in text:
+        category = "VALIDATION_ERROR"
+        cause = "The route returned 422 Unprocessable Entity due to missing required query parameters or body payload."
+        fix = "Supply required parameters or mock request body payload matching the endpoint schema."
+    elif "500" in text or "internal server error" in text:
+        category = "INTERNAL_SERVER_ERROR"
+        cause = "The endpoint encountered an unhandled internal server exception during request handling."
+        fix = "Inspect route stack traces, mock uninitialized external services, or add defensive error handling."
     else:
         cause = "Insufficient information to determine the root cause."
-        fix = "Review the error output, rollout status, and the most recent pod logs."
+        fix = "Review the error output, test runner stdout/stderr, and traceback details."
 
     prompt = (
-        f"{FAILURE_ANALYSIS_PROMPT}\n\n"
-        f"Error: {error}\n\n"
-        f"Evidence: {json.dumps(evidence, indent=2)}"
+        f"{TEST_FAILURE_PROMPT}\n\n"
+        f"TEST COMMAND: {command or 'pytest'}\n\n"
+        f"STDOUT:\n{evidence[0][:2500] if len(evidence) > 0 else 'None'}\n\n"
+        f"STDERR:\n{evidence[1][:2500] if len(evidence) > 1 else (evidence[0][:2500] if evidence else error)}"
     )
     llm_text = _safe_chat(prompt)
     summary = llm_text or cause
@@ -776,7 +971,26 @@ def explain_failure(error: str, evidence: list[str] | None = None) -> dict:
         "likely_cause": summary,
         "evidence": evidence,
         "suggested_fix": fix,
+        "category": category,
     }
+
+
+def _discover_python_entrypoint(repo_path: Path, framework: str) -> tuple[str | None, str | None]:
+    candidates = [
+        ("app/main.py", "app.main", "app"),
+        ("main.py", "main", "app"),
+        ("app/api.py", "app.api", "app"),
+        ("api.py", "api", "app"),
+        ("src/main.py", "src.main", "app"),
+        ("backend/app/main.py", "app.main", "app"),
+    ]
+    for rel, mod, attr in candidates:
+        candidate_file = repo_path / rel
+        if candidate_file.is_file():
+            content = candidate_file.read_text(encoding="utf-8", errors="ignore")
+            if "FastAPI(" in content or "Flask(" in content:
+                return mod, attr
+    return None, None
 
 
 def run_ai_generated_tests(project_id: int, repository_url: str, analysis: dict, timeout: int = 180) -> AITestRun:
@@ -789,42 +1003,46 @@ def run_ai_generated_tests(project_id: int, repository_url: str, analysis: dict,
         )
 
     module_name, app_attr = _entrypoint_module_and_attr(analysis.get("entrypoint"))
-    if not module_name or not app_attr:
-        return AITestRun(
-            status="skipped",
-            message="A Python entrypoint is required before AI-generated tests can run.",
-        )
 
     temp_dir = Path(settings.workspace_dir) / f"project_{project_id}_ai_tests"
     app_dir = temp_dir / (analysis.get("source_subdir") or "")
-    routes = _route_candidates(project_id)
-    code = _python_test_file(framework, module_name, app_attr, routes)
-    prompt = (
-        f"{TEST_GENERATION_PROMPT}\n\n"
-        f"Framework: {framework}\nEntrypoint: {analysis.get('entrypoint')}\nRoutes: {json.dumps(routes)}"
-    )
-    llm_text = _safe_chat(prompt)
-    rationale = llm_text or "Generated route checks from the detected Python entrypoint and indexed routes."
-    case = GeneratedTestCase(
-        name="generated_api_checks",
-        rationale=rationale,
-        path=".deploymind_generated/test_ai_generated.py",
-        code=code,
-    )
 
     try:
         clone_repository(repository_url, temp_dir)
         if not app_dir.is_dir():
             app_dir = temp_dir
 
-        # Resolve the directory that actually contains the Python 'app' package.
-        # If app_dir itself has app/__init__.py that's the right place.
-        # If not, search one level of subdirectories (e.g. backend/app/).
+        if not module_name or not app_attr:
+            module_name, app_attr = _discover_python_entrypoint(app_dir, framework)
+
+        if not module_name or not app_attr:
+            return AITestRun(
+                status="skipped",
+                message="A Python entrypoint could not be located before AI-generated tests could run.",
+            )
+
+        routes = _route_candidates(project_id)
+        inferences = _generate_test_inferences(framework, routes)
+        code = _python_test_file(framework, module_name, app_attr, routes)
+        prompt = (
+            f"{TEST_GENERATION_PROMPT}\n\n"
+            f"Framework: {framework}\nEntrypoint: {analysis.get('entrypoint') or f'{module_name}:{app_attr}'}\nRoutes: {json.dumps(routes)}"
+        )
+        llm_text = _safe_chat(prompt)
+        rationale = llm_text or "Generated route checks from the detected Python entrypoint and indexed routes."
+        case = GeneratedTestCase(
+            name="generated_api_checks",
+            rationale=rationale,
+            path=".deploymind_generated/test_ai_generated.py",
+            code=code,
+        )
+
+        # Resolve the directory that actually contains the Python package or module
         module_pkg = module_name.split(".")[0]
         python_path = app_dir
-        if not (app_dir / module_pkg).is_dir():
+        if not (app_dir / module_pkg).is_dir() and not (app_dir / f"{module_pkg}.py").is_file():
             for sub in sorted(app_dir.iterdir()):
-                if sub.is_dir() and (sub / module_pkg).is_dir():
+                if sub.is_dir() and ((sub / module_pkg).is_dir() or (sub / f"{module_pkg}.py").is_file()):
                     python_path = sub
                     break
 
@@ -835,16 +1053,16 @@ def run_ai_generated_tests(project_id: int, repository_url: str, analysis: dict,
         test_file = gen_dir / "test_ai_generated.py"
         test_file.write_text(code, encoding="utf-8")
 
-        # Install deps from the correct directory
         prepare_error = _prepare_python_repo(python_path, timeout=min(timeout, 240), framework=framework)
         if prepare_error:
-            analysis = explain_failure("Dependency install failed before AI tests", [prepare_error])
+            failure_res = explain_failure("Dependency install failed before AI tests", [prepare_error], command="pip install")
             return AITestRun(
                 status="failed",
                 message="Dependency install failed before AI-generated tests",
                 generated_tests=[case],
                 stderr=prepare_error,
-                failure_analysis=analysis,
+                failure_analysis=failure_res,
+                test_inferences=inferences,
             )
 
         command = "pytest .deploymind_generated/test_ai_generated.py -q"
@@ -871,8 +1089,9 @@ def run_ai_generated_tests(project_id: int, repository_url: str, analysis: dict,
                 generated_tests=[case],
                 stdout=stdout,
                 stderr=stderr,
+                test_inferences=inferences,
             )
-        failure = explain_failure("AI-generated tests failed", [stdout, stderr])
+        failure = explain_failure("AI-generated tests failed", [stdout, stderr], command=command)
         return AITestRun(
             status="failed",
             message="AI-generated tests failed",
@@ -881,14 +1100,16 @@ def run_ai_generated_tests(project_id: int, repository_url: str, analysis: dict,
             stdout=stdout,
             stderr=stderr,
             failure_analysis=failure,
+            test_inferences=inferences,
         )
     except subprocess.TimeoutExpired:
-        failure = explain_failure("AI-generated tests timed out")
+        failure = explain_failure("AI-generated tests timed out", command=command)
         return AITestRun(
             status="failed",
             message=f"AI-generated tests timed out after {timeout}s",
-            generated_tests=[case],
+            generated_tests=[case] if 'case' in locals() else [],
             failure_analysis=failure,
+            test_inferences=inferences if 'inferences' in locals() else [],
         )
     finally:
         cleanup_repository(temp_dir)

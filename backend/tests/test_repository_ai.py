@@ -133,3 +133,44 @@ def test_sanitize_requirements_file_removes_suspicious_install(tmp_path: Path):
 
     assert removed == ["install==1.3.5"]
     assert "install==1.3.5" not in req.read_text(encoding="utf-8")
+
+
+def test_test_inferences_generated_for_fastapi():
+    from app.services.repository_ai import _generate_test_inferences
+    inferences = _generate_test_inferences("FastAPI", ["/", "/health", "/items/{id}"])
+    targets = [inf.target for inf in inferences]
+    assert "/" in targets
+    assert "/openapi.json" in targets
+    assert "/docs" in targets
+    assert any("OpenAPI" in inf.name for inf in inferences)
+    assert any("Kubernetes" in inf.inference for inf in inferences)
+
+
+def test_get_active_ai_provider_selection(monkeypatch):
+    from app.services.repository_ai import get_active_ai_provider, settings
+
+    monkeypatch.setattr(settings, "openai_api_key", "")
+    monkeypatch.setattr(settings, "grok_api_key", "")
+    monkeypatch.setattr(settings, "xai_api_key", "")
+    p1 = get_active_ai_provider()
+    assert p1["provider"] == "Grounded Heuristic"
+
+    monkeypatch.setattr(settings, "grok_api_key", "xai-test-key-12345")
+    p2 = get_active_ai_provider()
+    assert p2["provider"] == "xAI Grok"
+    assert "grok" in p2["model"].lower()
+
+    monkeypatch.setattr(settings, "openai_api_key", "sk-live-test-key-999")
+    p3 = get_active_ai_provider()
+    assert p3["provider"] == "OpenAI"
+
+
+def test_failure_explanation_categories():
+    r1 = explain_failure("pydantic_core.ValidationError: 1 validation error for Settings\nSECRET_KEY Field required")
+    assert r1["category"] == "SETTINGS_VALIDATION"
+    assert "secret_key" in r1["suggested_fix"].lower()
+
+    r2 = explain_failure("AssertionError: 401 != 200", ["Status 401 Unauthorized", "Not authenticated"])
+    assert r2["category"] == "AUTHENTICATION_REQUIRED"
+    assert "authorization" in r2["suggested_fix"].lower()
+

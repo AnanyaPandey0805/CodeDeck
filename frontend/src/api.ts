@@ -66,6 +66,7 @@ export type RepositoryAnswer = {
   question: string;
   answer: string;
   sources: SearchSource[];
+  provider?: string;
 };
 
 export type EvaluationItem = {
@@ -85,6 +86,12 @@ export type Evaluation = {
 
 export type GeneratedTestCase = { name: string; rationale: string; path: string; code: string };
 
+export type TestInference = {
+  name: string;
+  target: string;
+  inference: string;
+};
+
 export type GeneratedTestRun = {
   status: string;
   message: string;
@@ -92,7 +99,14 @@ export type GeneratedTestRun = {
   generated_tests: GeneratedTestCase[];
   stdout: string;
   stderr: string;
-  failure_analysis: Record<string, unknown> | null;
+  failure_analysis: {
+    failure?: string;
+    likely_cause?: string;
+    suggested_fix?: string;
+    category?: string;
+    evidence?: string[];
+  } | null;
+  test_inferences?: TestInference[];
 };
 
 export type Deployment = {
@@ -111,6 +125,7 @@ export type SystemStatus = {
   docker: { ok: boolean; message: string };
   kind: { ok: boolean; available: boolean; clusters: string[]; message: string };
   kubectl: { ok: boolean; message: string };
+  ai_provider?: { provider: string; model: string; status: string };
 };
 
 export const getHealth = () => request<{ status: string; service: string }>('/health');
