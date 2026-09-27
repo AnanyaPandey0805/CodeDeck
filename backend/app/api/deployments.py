@@ -1,6 +1,7 @@
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -15,6 +16,7 @@ from app.api.schemas import DeploymentOut
 from app.core.config import settings
 from app.db.database import SessionLocal, get_db
 from app.db.models import Analysis, Deployment, GeneratedFile, Project
+from app.services import kubernetes as k8s_svc
 from app.services.pipeline import upsert_step
 from app.services.repository_ai import analyze_deployment_failure
 
@@ -288,4 +290,46 @@ def list_deployments(project_id: int, db: Session = Depends(get_db)):
         .order_by(Deployment.created_at.desc())
         .all()
     )
+
+
+@router.api_route("/{project_id}/preview", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+@router.api_route("/{project_id}/preview/{subpath:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+async def preview_app(project_id: int, request: Request, subpath: str = "", db: Session = Depends(get_db)):
+    project = _get_project(project_id, db)
+    app_name = sanitize_name(project.repository_name or "app")
+    namespace = settings.k8s_namespace
+
+    try:
+        local_port = k8s_svc.port_forward_manager.get_port(app_name, namespace)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Cannot connect to Kubernetes service: {exc}")
+
+    cleaned_subpath = subpath.lstrip("/")
+    url = f"http://127.0.0.1:{local_port}/{cleaned_subpath}"
+    if request.url.query:
+        url += f"?{request.url.query}"
+
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length")}
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.request(
+                method=request.method,
+                url=url,
+                headers=headers,
+                content=body if body else None,
+                follow_redirects=False,
+            )
+            # Filter hop-by-hop headers
+            excluded = {"content-encoding", "transfer-encoding", "connection"}
+            resp_headers = {k: v for k, v in resp.headers.items() if k.lower() not in excluded}
+            return Response(
+                content=resp.content,
+                status_code=resp.status_code,
+                headers=resp_headers,
+                media_type=resp.headers.get("content-type"),
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Proxy error: {exc}")
+
 

@@ -1,4 +1,6 @@
 import logging
+import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -6,15 +8,45 @@ from app.core.config import settings
 
 logger = logging.getLogger("deploymind")
 
+# Patterns that indicate a Dockerfile requires BuildKit (--mount) or complex
+# multi-stage tooling (bun, uv sync --frozen, etc.) that won't work with the
+# legacy builder inside the CodeDeck container.
+_BUILDKIT_REQUIRED_PATTERNS = re.compile(
+    r"--mount=type="
+    r"|RUN\s+--mount"
+    r"|FROM\s+oven/bun"
+    r"|FROM\s+ghcr\.io/astral-sh/uv"
+    r"|uv\s+sync\s+--frozen"
+    r"|bun\s+install"
+    r"|bun\s+run\s+build",
+    re.IGNORECASE,
+)
+
+
+def has_complex_dockerfile(path: Path) -> bool:
+    """Return True if the Dockerfile uses BuildKit-only features or multi-stage
+    tooling (bun, uv --frozen mounts) that CodeDeck cannot build as-is."""
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        return bool(_BUILDKIT_REQUIRED_PATTERNS.search(text))
+    except Exception:
+        return False
+
 
 def run_cmd(args: list[str], cwd: str | Path | None = None, timeout: int = 600) -> subprocess.CompletedProcess[str]:
     logger.info("running: %s", " ".join(args))
+    env = os.environ.copy()
+    env["DOCKER_BUILDKIT"] = "1"
+    env["BUILDKIT_PROGRESS"] = "plain"
     return subprocess.run(
         args,
         cwd=cwd,
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=env,
     )
 
 

@@ -16,21 +16,24 @@ services:
       retries: 10
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"
     env_file:
       - .env
     environment:
+      # Override DATABASE_URL so container always talks to the db service,
+      # not the host-mapped localhost:5433 value in .env
       DATABASE_URL: postgresql+psycopg://deploymind:deploymind@db:5432/deploymind
-      CORS_ORIGINS: http://localhost:5173,http://localhost:3000,http://localhost
+      CORS_ORIGINS: "http://localhost:3000,http://localhost:5173,http://localhost"
       KIND_CLUSTER_NAME: deploymind
       K8S_NAMESPACE: deploymind
     volumes:
       - ./backend/app:/app/app
       - workspace:/tmp/deploymind
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${USERPROFILE}/.kube:/host-kube:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     dns:
@@ -41,7 +44,9 @@ services:
         condition: service_healthy
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     ports:
       - "3000:80"
     depends_on:

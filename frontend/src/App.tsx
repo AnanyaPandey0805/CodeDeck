@@ -913,7 +913,7 @@ export default function App() {
                   })}
 
                   {/* Deploy controls */}
-                  <div className="flex flex-wrap gap-3">
+                  <div className="flex flex-wrap gap-3 items-center">
                     <button
                       onClick={onDeployStaging}
                       disabled={deploying || busy || files.length === 0}
@@ -930,14 +930,25 @@ export default function App() {
                         {deployingProd ? 'Deploying GREEN…' : 'Deploy Production (GREEN)'}
                       </button>
                     )}
+                    {['staging_healthy', 'production_awaiting_approval', 'production_healthy', 'rolled_back'].includes(selected.status) && (
+                      <a
+                        href={`/api/projects/${selected.id}/preview/docs`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="rounded bg-purple-700 px-4 py-2 text-xs font-medium text-white hover:bg-purple-600 flex items-center gap-1.5 shadow-lg shadow-purple-900/30"
+                      >
+                        <span>🌐 Open Live Preview (Docs)</span>
+                        <span className="text-[10px] opacity-75">↗</span>
+                      </a>
+                    )}
                   </div>
 
                   {/* Approval banner */}
                   {selected.status === 'production_awaiting_approval' && (
                     <div className="rounded border border-yellow-700/50 bg-yellow-950/30 p-4">
                       <div className="text-sm font-medium text-yellow-300 mb-2">Production Approval Required</div>
-                      <p className="text-xs text-yellow-400 mb-3">GREEN version deployed and verified. Approve to switch live traffic.</p>
-                      <div className="flex gap-3">
+                      <p className="text-xs text-yellow-400 mb-3">GREEN version deployed and verified. Test via Live Preview, then approve to switch live traffic.</p>
+                      <div className="flex gap-3 items-center">
                         <button
                           onClick={onApprove}
                           disabled={approvingProd}
@@ -952,6 +963,14 @@ export default function App() {
                         >
                           {rollingBack ? 'Rolling back…' : 'Rollback to BLUE'}
                         </button>
+                        <a
+                          href={`/api/projects/${selected.id}/preview/docs`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-yellow-300 underline hover:text-yellow-200 ml-2"
+                        >
+                          Test GREEN Preview ↗
+                        </a>
                       </div>
                     </div>
                   )}
@@ -963,12 +982,31 @@ export default function App() {
                         ? 'border-emerald-700/30 bg-emerald-950/20'
                         : 'border-red-700/30 bg-red-950/20'
                     }`}>
-                      <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-2">Smoke Test</div>
+                      <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-2">Smoke Test & Access</div>
                       <div className={`font-bold ${smokeResult.status === 'passed' ? 'text-emerald-400' : 'text-red-400'}`}>
                         {smokeResult.status === 'passed' ? '✓ PASSED' : '✗ FAILED'}
                       </div>
                       <div className="mt-1 text-zinc-400">{String(smokeResult.message ?? '')}</div>
-                      {Boolean(smokeResult.url) && <div className="mt-1 font-mono text-zinc-500">{String(smokeResult.url)}</div>}
+                      <div className="mt-2.5 flex flex-wrap gap-2">
+                        <a
+                          href={`/api/projects/${selected.id}/preview/docs`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 rounded bg-emerald-600/20 px-2.5 py-1 text-xs text-emerald-300 hover:bg-emerald-600/30 border border-emerald-500/30 font-medium"
+                        >
+                          <span>🚀 Open Swagger API Docs</span>
+                          <span>↗</span>
+                        </a>
+                        <a
+                          href={`/api/projects/${selected.id}/preview/`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 rounded bg-zinc-800 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-700 border border-zinc-700"
+                        >
+                          <span>App Root</span>
+                          <span>↗</span>
+                        </a>
+                      </div>
                     </div>
                   )}
 
