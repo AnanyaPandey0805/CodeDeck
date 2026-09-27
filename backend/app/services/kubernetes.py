@@ -182,8 +182,54 @@ def get_service_port(service: str, namespace: str) -> int:
         return int(proc.stdout.strip())
     return 80
 
+
+class PortForwardManager:
+    def __init__(self):
+        self._processes: dict[str, tuple[int, subprocess.Popen]] = {}
+
+    def get_port(self, service: str, namespace: str) -> int:
+        key = f"{namespace}/{service}"
+        if key in self._processes:
+            port, proc = self._processes[key]
+            if proc.poll() is None:
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.3)
+                        if s.connect_ex(("127.0.0.1", port)) == 0:
+                            return port
+                except Exception:
+                    pass
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+        local_port = _free_port()
+        svc_port = get_service_port(service, namespace)
+        proc = subprocess.Popen(
+            [
+                "kubectl",
+                "port-forward",
+                "-n",
+                namespace,
+                f"svc/{service}",
+                f"{local_port}:{svc_port}",
+                "--address=0.0.0.0",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, **({"KUBECONFIG": settings.kubeconfig} if settings.kubeconfig else {})},
+        )
+        time.sleep(1.2)
+        self._processes[key] = (local_port, proc)
+        return local_port
+
+
+port_forward_manager = PortForwardManager()
+
 def smoke_test(service: str, namespace: str, paths: list[str] | None = None, timeout_s: int = 60) -> dict:
-    paths = paths or ["/health", "/", "/docs"]
+    paths = paths or ["/docs", "/health", "/api/v1/utils/health-check", "/api/v1", "/", "/openapi.json"]
     local_port = _free_port()
     svc_port = get_service_port(service, namespace)
     pf = subprocess.Popen(
@@ -211,7 +257,7 @@ def smoke_test(service: str, namespace: str, paths: list[str] | None = None, tim
             for path in paths:
                 url = f"http://127.0.0.1:{local_port}{path}"
                 try:
-                    res = httpx.get(url, timeout=3.0)
+                    res = httpx.get(url, timeout=3.0, follow_redirects=True)
                     if res.status_code < 500:
                         logger.info("smoke test passed: %s -> %s", url, res.status_code)
                         return {
@@ -237,8 +283,9 @@ def patch_manifests_for_local(
     image: str,
     app_name: str,
     replicas: int = 1,
+    env_vars: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Rewrite image and pull policy for kind; prefer TCP probes for broader app support."""
+    """Rewrite image and pull policy for kind; inject environment variables; prefer TCP probes."""
     import yaml
     patched: dict[str, str] = {}
     for name, content in files.items():
@@ -254,7 +301,16 @@ def patch_manifests_for_local(
                 for container in containers:
                     container["image"] = image
                     container["imagePullPolicy"] = "Never"
-                    
+
+                    # Inject / merge environment variables
+                    if env_vars:
+                        existing_env = container.get("env") or []
+                        env_map = {item["name"]: item.get("value", "") for item in existing_env if "name" in item}
+                        for k, v in env_vars.items():
+                            if k not in env_map:
+                                env_map[k] = str(v)
+                        container["env"] = [{"name": k, "value": str(v)} for k, v in env_map.items()]
+
                     # Convert probes to TCP for local kind stability
                     if "readinessProbe" in container and "httpGet" in container["readinessProbe"]:
                         container["readinessProbe"] = {
@@ -280,10 +336,11 @@ def patch_manifests_for_blue_green(
     app_name: str,
     version: str = "green",
     replicas: int = 2,
+    env_vars: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Patch manifests specifically for blue-green production deployment."""
     import yaml
-    patched = patch_manifests_for_local(files, image=image, app_name=app_name, replicas=replicas)
+    patched = patch_manifests_for_local(files, image=image, app_name=app_name, replicas=replicas, env_vars=env_vars)
     result: dict[str, str] = {}
     for name, content in patched.items():
         if name.startswith("deployment") or name.startswith("service"):

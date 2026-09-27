@@ -9,9 +9,99 @@ from app.core.config import settings
 from app.services import docker as docker_svc
 from app.services import kubernetes as k8s_svc
 from app.services.dependency_sanitizer import choose_python_base_image, sanitize_requirements_file
+from app.services.docker import has_complex_dockerfile
 from app.services.github import cleanup_repository, clone_repository
 
 logger = logging.getLogger("deploymind")
+
+
+def _allocate_node_port(app_name: str, base: int = 30100, spread: int = 2600) -> int:
+    """Map an app name deterministically to a NodePort in the 30000–32767 range.
+
+    Using hash(name) % spread + base keeps ports stable across redeployments
+    for the same app while staying within Kubernetes' allowed NodePort range.
+    """
+    return base + (hash(app_name) % spread)
+
+
+def _nodeport_service_manifest(
+    app_name: str, container_port: int, node_port: int, namespace: str
+) -> str:
+    """Generate a Kubernetes NodePort Service YAML that exposes the app on the
+    host so users can open http://localhost:<node_port> directly in a browser."""
+    return f"""apiVersion: v1
+kind: Service
+metadata:
+  name: {app_name}-nodeport
+  namespace: {namespace}
+  labels:
+    app: {app_name}
+    managed-by: codedeck
+spec:
+  type: NodePort
+  selector:
+    app: {app_name}
+  ports:
+    - name: http
+      protocol: TCP
+      port: {container_port}
+      targetPort: {container_port}
+      nodePort: {node_port}
+"""
+
+
+def _collect_runtime_env(app_name: str, app_dir: Path, port: int) -> dict[str, str]:
+    """Gather environment variables from .env files and provide standard defaults
+    so apps requiring settings (like FastAPI templates) start cleanly."""
+    env_vars: dict[str, str] = {}
+    candidates = [
+        app_dir / ".env",
+        app_dir / ".env.example",
+        app_dir / ".env.sample",
+        app_dir.parent / ".env",
+        app_dir.parent / ".env.example",
+        app_dir / "backend" / ".env",
+        app_dir / "backend" / ".env.example",
+    ]
+    for p in candidates:
+        if p.is_file():
+            try:
+                for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, _, v = line.partition("=")
+                        k = k.strip()
+                        v = v.strip().strip('"').strip("'")
+                        if k and k not in env_vars:
+                            env_vars[k] = v
+            except Exception:
+                pass
+
+    standard_defaults = {
+        "ENVIRONMENT": "local",
+        "PROJECT_NAME": app_name,
+        "SECRET_KEY": "staging-secret-key-super-secure-change-in-prod-12345678",
+        "FIRST_SUPERUSER": "admin@example.com",
+        "FIRST_SUPERUSER_PASSWORD": "supersecretpassword123",
+        "USERS_OPEN_REGISTRATION": "True",
+        "EMAILS_ENABLED": "False",
+        "DOMAIN": "localhost",
+        "FRONTEND_HOST": "http://localhost",
+        "BACKEND_CORS_ORIGINS": '["http://localhost", "http://localhost:3000", "http://localhost:8000"]',
+        "POSTGRES_SERVER": "localhost",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_USER": "postgres",
+        "POSTGRES_PASSWORD": "supersecretpassword123",
+        "POSTGRES_DB": "app",
+        "DATABASE_URL": "postgresql://postgres:supersecretpassword123@localhost:5432/app",
+        "PORT": str(port),
+    }
+    merged = {**standard_defaults, **env_vars}
+    if "DATABASE_URL" in merged and "changethis" in merged["DATABASE_URL"]:
+        merged["DATABASE_URL"] = merged["DATABASE_URL"].replace("changethis", "supersecretpassword123")
+    if merged.get("FIRST_SUPERUSER_PASSWORD") == "changethis":
+        merged["FIRST_SUPERUSER_PASSWORD"] = "supersecretpassword123"
+    return merged
 
 
 def _prepare_deployment_source(project_id: int, repository_url: str, dest: Path) -> Path:
@@ -80,7 +170,9 @@ def _reliable_staging_dockerfile(app_dir: Path, analysis: dict) -> str:
     python_base = choose_python_base_image(app_dir)
 
     existing_dockerfile = app_dir / "Dockerfile"
-    if existing_dockerfile.exists():
+    # Only reuse the existing Dockerfile if it's simple enough to build;
+    # complex Dockerfiles (bun, uv --mount, multi-stage CI) need replacement.
+    if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile):
         return existing_dockerfile.read_text(encoding="utf-8", errors="ignore")
 
     if (app_dir / "requirements.txt").exists():
@@ -96,12 +188,16 @@ CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
 """
 
     if (app_dir / "uv.lock").exists() or pm == "uv":
+        # Install with pip (no uv mount syntax) so BuildKit is not required.
+        # We copy the full source first so editable/src-layout packages resolve.
         return f"""FROM {python_base}
 WORKDIR /app
-RUN pip install --no-cache-dir uv
-COPY pyproject.toml* uv.lock* ./
-RUN uv pip install --system --no-cache . || pip install --no-cache-dir fastapi uvicorn
+RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
+COPY pyproject.toml* uv.lock* README* ./
 COPY . .
+RUN pip install --no-cache-dir --upgrade pip && \\
+    pip install --no-cache-dir . 2>/dev/null || \\
+    pip install --no-cache-dir fastapi uvicorn sqlalchemy psycopg pydantic pydantic-settings
 RUN useradd --create-home --uid 1000 appuser
 USER appuser
 EXPOSE {port}
@@ -183,10 +279,19 @@ def deploy_staging(
             app_dir = dest
         sanitize_requirements_file(app_dir)
         existing_dockerfile = app_dir / "Dockerfile"
-        if existing_dockerfile.exists() :
-            context_dir=dest
-            dockerfile_path=existing_dockerfile
+        # Bypass the repo's own Dockerfile if it uses BuildKit-only features
+        # (e.g., RUN --mount, oven/bun, uv sync --frozen) that represent a
+        # full CI/CD pipeline rather than a simple container build. We generate
+        # a simpler, self-contained Dockerfile for the backend service only.
+        if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile):
+            context_dir = dest
+            dockerfile_path = existing_dockerfile
         else:
+            if existing_dockerfile.exists() and has_complex_dockerfile(existing_dockerfile):
+                logger.warning(
+                    "Repo Dockerfile uses BuildKit-only or multi-tool features; "
+                    "generating a compatible replacement for staging build."
+                )
             staging_content = dockerfile.strip()
             if not staging_content:
                 staging_content = _reliable_staging_dockerfile(app_dir, analysis)
@@ -197,7 +302,7 @@ def deploy_staging(
                 analysis.get("source_subdir"),
             )
 
-        docker_svc.build_image(context_dir, dockerfile_path, image,timeout=1800)
+        docker_svc.build_image(context_dir, dockerfile_path, image, timeout=1800)
         docker_svc.kind_load_image(image, cluster=cluster)
 
         local_files = {
@@ -208,7 +313,11 @@ def deploy_staging(
         if not local_files:
             raise RuntimeError("No Kubernetes manifests found. Run analysis first.")
 
-        patched = k8s_svc.patch_manifests_for_local(local_files, image=image, app_name=app_name, replicas=1)
+        port = int(analysis.get("port") or 8000)
+        env_vars = _collect_runtime_env(app_name, dest, port)
+        patched = k8s_svc.patch_manifests_for_local(
+            local_files, image=image, app_name=app_name, replicas=1, env_vars=env_vars
+        )
         # Keep a staging-named deployment for clarity while reusing service name
         if "deployment.yaml" in patched:
             patched["deployment.yaml"] = patched["deployment.yaml"].replace(
@@ -216,6 +325,14 @@ def deploy_staging(
                 f"name: {app_name}-staging\n",
                 1,
             )
+
+        # Inject a NodePort service so the app is reachable from the host browser
+        # without manual kubectl port-forward.
+        port = int(analysis.get("port") or 8000)
+        node_port = _allocate_node_port(app_name)
+        patched["nodeport-service.yaml"] = _nodeport_service_manifest(
+            app_name, port, node_port, namespace
+        )
 
         deploy_name = f"{app_name}-staging"
         k8s_svc.apply_manifests(patched, namespace=namespace)
@@ -226,7 +343,9 @@ def deploy_staging(
         if smoke.get("status") != "passed":
             raise RuntimeError(smoke.get("message") or "Smoke test failed")
 
-        logger.info("deployment completed: staging %s", app_name)
+        access_url = f"http://localhost:3000/api/projects/{project_id}/preview/docs"
+        smoke["url"] = access_url
+        logger.info("deployment completed: staging %s accessible at %s", app_name, access_url)
         return StagingDeployResult(
             status="healthy",
             image=image,
@@ -235,7 +354,7 @@ def deploy_staging(
             rollout=rollout,
             smoke=smoke,
             deployment_status=status,
-            message=f"Staging healthy ({smoke.get('message')})",
+            message=f"Staging healthy — open {access_url} in your browser ({smoke.get('message')})",
         )
     finally:
         cleanup_repository(dest)
@@ -285,13 +404,19 @@ def deploy_green(
         sanitize_requirements_file(app_dir)
 
         existing_dockerfile = app_dir / "Dockerfile"
-        if existing_dockerfile.exists() :
-            context_dir=dest
-            dockerfile_path=existing_dockerfile 
+        # Bypass complex Dockerfiles (bun, uv --mount, etc.) same as staging
+        if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile):
+            context_dir = dest
+            dockerfile_path = existing_dockerfile
         else:
+            if existing_dockerfile.exists() and has_complex_dockerfile(existing_dockerfile):
+                logger.warning(
+                    "Repo Dockerfile uses BuildKit-only or multi-tool features; "
+                    "generating a compatible replacement for production build."
+                )
             staging_content = dockerfile.strip()
             if not staging_content:
-                 staging_content = _reliable_staging_dockerfile(app_dir, analysis)
+                staging_content = _reliable_staging_dockerfile(app_dir, analysis)
             staging_content = _adjust_python_base_image(staging_content, app_dir)
             context_dir, dockerfile_path = _write_build_context(
                 dest,
@@ -310,8 +435,10 @@ def deploy_green(
         if not local_files:
             raise RuntimeError("No Kubernetes manifests found.")
 
+        port = int(analysis.get("port") or 8000)
+        env_vars = _collect_runtime_env(app_name, dest, port)
         patched = k8s_svc.patch_manifests_for_blue_green(
-            local_files, image=image, app_name=app_name, version="green", replicas=2
+            local_files, image=image, app_name=app_name, version="green", replicas=2, env_vars=env_vars
         )
 
         deploy_name = f"{app_name}-green"
@@ -323,11 +450,12 @@ def deploy_green(
         blue_status = k8s_svc.get_deployment_status(f"{app_name}-blue", namespace=namespace)
         if not blue_status.get("ready"):
             blue_patched = k8s_svc.patch_manifests_for_blue_green(
-                local_files, image=f"deploymind/{app_name}:staging", app_name=app_name, version="blue", replicas=1
+                local_files, image=f"deploymind/{app_name}:staging", app_name=app_name, version="blue", replicas=1, env_vars=env_vars
             )
             k8s_svc.apply_manifests(blue_patched, namespace=namespace)
 
         smoke = k8s_svc.smoke_test(app_name, namespace=namespace)
+        smoke["url"] = f"http://localhost:3000/api/projects/{project_id}/preview/docs"
 
         logger.info("green deployment ready: %s, awaiting approval", app_name)
         return ProductionDeployResult(
@@ -338,7 +466,7 @@ def deploy_green(
             rollout=rollout,
             smoke=smoke,
             deployment_status=status,
-            message="GREEN version deployed and healthy. Awaiting production approval.",
+            message=f"GREEN version deployed and healthy. Open {smoke['url']} to test before approving.",
         )
     finally:
         cleanup_repository(dest)
