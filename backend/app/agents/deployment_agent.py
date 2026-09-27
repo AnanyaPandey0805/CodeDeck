@@ -131,6 +131,30 @@ class StagingDeployResult(BaseModel):
     message: str = ""
 
 
+def _determine_build_context(
+    repo_path: Path,
+    app_dir: Path,
+    dockerfile_path: Path,
+    source_subdir: str | None,
+) -> Path:
+    """Determine whether docker build context should be repo root or app_dir.
+
+    If the Dockerfile explicitly references paths like 'backend/' or '../',
+    or if app_dir is repo_path, context is repo_path.
+    Otherwise, if the Dockerfile is in app_dir and uses relative paths (e.g. 'COPY requirements.txt'),
+    context must be app_dir so files are placed directly at the container root.
+    """
+    if app_dir == repo_path or not source_subdir:
+        return repo_path
+
+    if dockerfile_path.is_file():
+        content = dockerfile_path.read_text(encoding="utf-8", errors="ignore")
+        if f"{source_subdir}/" in content or f"./{source_subdir}/" in content or "../" in content:
+            return repo_path
+
+    return app_dir
+
+
 def _write_build_context(
     repo_path: Path,
     dockerfile_content: str,
@@ -152,13 +176,7 @@ def _write_build_context(
     else:
         raise RuntimeError("No Dockerfile available for build")
 
-    # If building for a nested directory (e.g. backend/), or if root contains
-    # root dependencies (package.json, pyproject.toml, docker-compose.yml),
-    # the build context MUST be the repository root so COPY instructions work.
-    has_root_files = any(
-        (repo_path / f).exists() for f in ("package.json", "docker-compose.yml", "pyproject.toml", "requirements.txt")
-    )
-    context_dir = repo_path if (source_subdir or has_root_files) else app_dir
+    context_dir = _determine_build_context(repo_path, app_dir, dockerfile_path, source_subdir)
     return context_dir, dockerfile_path
 
 
@@ -181,7 +199,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-RUN useradd --create-home --uid 1000 appuser
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE {port}
 CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
@@ -198,7 +216,7 @@ COPY . .
 RUN pip install --no-cache-dir --upgrade pip && \\
     pip install --no-cache-dir . 2>/dev/null || \\
     pip install --no-cache-dir fastapi uvicorn sqlalchemy psycopg pydantic pydantic-settings
-RUN useradd --create-home --uid 1000 appuser
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE {port}
 CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
@@ -211,7 +229,7 @@ RUN pip install --no-cache-dir poetry
 COPY pyproject.toml* poetry.lock* ./
 RUN poetry config virtualenvs.create false && (poetry install --no-interaction --no-ansi || pip install --no-cache-dir fastapi uvicorn)
 COPY . .
-RUN useradd --create-home --uid 1000 appuser
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE {port}
 CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
@@ -223,7 +241,33 @@ WORKDIR /app
 COPY pyproject.toml .
 RUN pip install --no-cache-dir . || pip install --no-cache-dir fastapi uvicorn
 COPY . .
-RUN useradd --create-home --uid 1000 appuser
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+EXPOSE {port}
+CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
+"""
+
+    # For Python projects without requirements.txt / lockfiles (e.g. testdrivenio/fastapi-react)
+    if lang == "python" or analysis.get("framework") in {"FastAPI", "Flask", "Django"}:
+        extra_pkgs: list[str] = []
+        for py_file in app_dir.rglob("*.py"):
+            try:
+                code_text = py_file.read_text(encoding="utf-8", errors="ignore")
+                for pkg_candidate in ("sqlalchemy", "pydantic", "httpx", "requests", "jinja2", "redis"):
+                    if pkg_candidate in code_text and pkg_candidate not in extra_pkgs:
+                        extra_pkgs.append(pkg_candidate)
+            except Exception:
+                pass
+
+        pkgs_str = " ".join(["fastapi", "uvicorn"] + extra_pkgs)
+        if analysis.get("framework") == "Flask":
+            pkgs_str = "flask gunicorn " + " ".join(extra_pkgs)
+
+        return f"""FROM {python_base}
+WORKDIR /app
+COPY . .
+RUN pip install --no-cache-dir {pkgs_str}
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE {port}
 CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
@@ -284,8 +328,8 @@ def deploy_staging(
         # full CI/CD pipeline rather than a simple container build. We generate
         # a simpler, self-contained Dockerfile for the backend service only.
         if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile):
-            context_dir = dest
             dockerfile_path = existing_dockerfile
+            context_dir = _determine_build_context(dest, app_dir, dockerfile_path, analysis.get("source_subdir"))
         else:
             if existing_dockerfile.exists() and has_complex_dockerfile(existing_dockerfile):
                 logger.warning(
@@ -406,8 +450,8 @@ def deploy_green(
         existing_dockerfile = app_dir / "Dockerfile"
         # Bypass complex Dockerfiles (bun, uv --mount, etc.) same as staging
         if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile):
-            context_dir = dest
             dockerfile_path = existing_dockerfile
+            context_dir = _determine_build_context(dest, app_dir, dockerfile_path, analysis.get("source_subdir"))
         else:
             if existing_dockerfile.exists() and has_complex_dockerfile(existing_dockerfile):
                 logger.warning(

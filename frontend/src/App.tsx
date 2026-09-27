@@ -327,7 +327,7 @@ export default function App() {
     { id: 'docker', label: 'Docker', icon: '▣' },
     { id: 'kubernetes', label: 'Kubernetes', icon: '⬡' },
     { id: 'logs', label: 'Logs', icon: '≡' },
-    { id: 'settings', label: 'Settings', icon: '⚙' },
+    { id: 'settings', label: 'Settings', icon: '⌗' },
   ]
 
   return (
@@ -912,12 +912,72 @@ export default function App() {
                     )
                   })}
 
+                  {Boolean(analysis?.is_multiservice || analysis?.analysis_result?.is_multiservice) && (
+                    <div className="rounded border border-sky-800/40 bg-sky-950/20 p-3 text-xs flex items-start gap-2.5">
+                      <div className="shrink-0 mt-0.5 text-sky-400 font-bold">ℹ</div>
+                      <div>
+                        <div className="font-medium text-sky-300">Multi-Service Architecture Detected</div>
+                        <p className="text-zinc-400 text-[11px] mt-0.5 leading-relaxed">
+                          This project includes both backend and frontend components ({
+                            analysis?.detected_services?.join(', ') ||
+                            (Array.isArray(analysis?.analysis_result?.detected_services)
+                              ? (analysis?.analysis_result?.detected_services as string[]).join(', ')
+                              : 'backend, frontend')
+                          }).
+                          CodeDeck containerizes and deploys the core <strong>{analysis?.framework || 'backend'}</strong> service to Kubernetes.
+                          The live API, health probes, and documentation are accessible below.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Blue-Green Zero-Downtime Deployment Lifecycle Guide */}
+                  <div className="rounded border border-zinc-800 bg-zinc-900/60 p-4">
+                    <div className="flex items-center justify-between mb-2.5">
+                      <div className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
+                        Blue-Green Deployment Workflow
+                      </div>
+                      <span className="rounded bg-sky-950/60 border border-sky-800/50 px-2 py-0.5 text-[10px] text-sky-300 font-medium">
+                        Zero Downtime Strategy
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                      <div className={`rounded border p-3 ${selected.status.startsWith('staging') ? 'border-sky-500/40 bg-sky-950/30' : 'border-zinc-800 bg-zinc-950/40'}`}>
+                        <div className="font-semibold text-sky-400 mb-1 flex items-center justify-between">
+                          <span>1. Staging (BLUE)</span>
+                          {selected.status === 'staging_healthy' && <span className="text-[10px] text-emerald-400 font-normal">Active</span>}
+                        </div>
+                        <p className="text-zinc-400 text-[11px] leading-relaxed">
+                          Rolls out to an isolated staging deployment. Verifies readiness probes and runs automated HTTP smoke tests before touching production.
+                        </p>
+                      </div>
+                      <div className={`rounded border p-3 ${selected.status === 'production_awaiting_approval' ? 'border-amber-500/40 bg-amber-950/30' : 'border-zinc-800 bg-zinc-950/40'}`}>
+                        <div className="font-semibold text-emerald-400 mb-1 flex items-center justify-between">
+                          <span>2. Production (GREEN)</span>
+                          {selected.status === 'production_awaiting_approval' && <span className="text-[10px] text-amber-300 font-normal">Awaiting Review</span>}
+                        </div>
+                        <p className="text-zinc-400 text-[11px] leading-relaxed">
+                          Spins up the new release alongside existing production. Live user traffic remains untouched while you test the GREEN version safely.
+                        </p>
+                      </div>
+                      <div className={`rounded border p-3 ${selected.status === 'production_healthy' ? 'border-emerald-500/40 bg-emerald-950/30' : 'border-zinc-800 bg-zinc-950/40'}`}>
+                        <div className="font-semibold text-purple-400 mb-1 flex items-center justify-between">
+                          <span>3. Traffic Switch & Rollback</span>
+                          {selected.status === 'production_healthy' && <span className="text-[10px] text-emerald-400 font-normal">Live</span>}
+                        </div>
+                        <p className="text-zinc-400 text-[11px] leading-relaxed">
+                          Approval flips the service selector to route 100% of live traffic to GREEN instantly. Automated 1-click rollback to BLUE is always available.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* Deploy controls */}
                   <div className="flex flex-wrap gap-3 items-center">
                     <button
                       onClick={onDeployStaging}
                       disabled={deploying || busy || files.length === 0}
-                      className="rounded bg-sky-700 px-4 py-2 text-xs font-medium text-white hover:bg-sky-600 disabled:opacity-50"
+                      className="rounded bg-sky-700 px-4 py-2 text-xs font-medium text-white hover:bg-sky-600 disabled:opacity-50 transition-colors"
                     >
                       {deploying ? 'Deploying Staging…' : 'Deploy Staging'}
                     </button>
@@ -925,7 +985,7 @@ export default function App() {
                       <button
                         onClick={() => { setDeployingProd(true); deployProduction(selected.id).finally(() => { setDeployingProd(false); loadProject(selected) }) }}
                         disabled={deployingProd}
-                        className="rounded bg-emerald-700 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+                        className="rounded bg-emerald-700 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50 transition-colors"
                       >
                         {deployingProd ? 'Deploying GREEN…' : 'Deploy Production (GREEN)'}
                       </button>
@@ -935,9 +995,9 @@ export default function App() {
                         href={`/api/projects/${selected.id}/preview/docs`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="rounded bg-purple-700 px-4 py-2 text-xs font-medium text-white hover:bg-purple-600 flex items-center gap-1.5 shadow-lg shadow-purple-900/30"
+                        className="rounded bg-purple-700 px-4 py-2 text-xs font-medium text-white hover:bg-purple-600 flex items-center gap-1.5 shadow-lg shadow-purple-900/30 transition-colors"
                       >
-                        <span>🌐 Open Live Preview (Docs)</span>
+                        <span>Open Live Preview (Swagger Docs)</span>
                         <span className="text-[10px] opacity-75">↗</span>
                       </a>
                     )}
@@ -975,36 +1035,46 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Smoke test result */}
+                  {/* Smoke test result & Live Endpoints */}
                   {smokeResult && (
                     <div className={`rounded border p-4 text-xs ${
                       smokeResult.status === 'passed'
                         ? 'border-emerald-700/30 bg-emerald-950/20'
                         : 'border-red-700/30 bg-red-950/20'
                     }`}>
-                      <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-2">Smoke Test & Access</div>
-                      <div className={`font-bold ${smokeResult.status === 'passed' ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {smokeResult.status === 'passed' ? '✓ PASSED' : '✗ FAILED'}
+                      <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Smoke Test & Live Endpoints</div>
+                      <div className={`font-bold flex items-center gap-1.5 ${smokeResult.status === 'passed' ? 'text-emerald-400' : 'text-red-400'}`}>
+                        <span>{smokeResult.status === 'passed' ? 'PASSED' : 'FAILED'}</span>
+                        <span className="font-normal text-zinc-500">·</span>
+                        <span className="font-normal text-zinc-400">{String(smokeResult.message ?? '')}</span>
                       </div>
-                      <div className="mt-1 text-zinc-400">{String(smokeResult.message ?? '')}</div>
-                      <div className="mt-2.5 flex flex-wrap gap-2">
+                      <div className="mt-3 flex flex-wrap gap-2">
                         <a
                           href={`/api/projects/${selected.id}/preview/docs`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 rounded bg-emerald-600/20 px-2.5 py-1 text-xs text-emerald-300 hover:bg-emerald-600/30 border border-emerald-500/30 font-medium"
+                          className="inline-flex items-center gap-1.5 rounded bg-emerald-600/20 px-3 py-1.5 text-xs text-emerald-300 hover:bg-emerald-600/30 border border-emerald-500/30 font-medium transition-colors"
                         >
-                          <span>🚀 Open Swagger API Docs</span>
-                          <span>↗</span>
+                          <span>Interactive API Docs</span>
+                          <span className="text-[10px] opacity-70">↗</span>
+                        </a>
+                        <a
+                          href={`/api/projects/${selected.id}/preview/openapi.json`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 rounded bg-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 border border-zinc-700 transition-colors"
+                        >
+                          <span>OpenAPI Schema</span>
+                          <span className="text-[10px] opacity-70">↗</span>
                         </a>
                         <a
                           href={`/api/projects/${selected.id}/preview/`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 rounded bg-zinc-800 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-700 border border-zinc-700"
+                          className="inline-flex items-center gap-1.5 rounded bg-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 border border-zinc-700 transition-colors"
                         >
-                          <span>App Root</span>
-                          <span>↗</span>
+                          <span>App Root Endpoint</span>
+                          <span className="text-[10px] opacity-70">↗</span>
                         </a>
                       </div>
                     </div>

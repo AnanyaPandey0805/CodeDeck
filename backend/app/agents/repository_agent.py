@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -14,6 +15,56 @@ K8S_NAMES = {
     "rbac.yaml",
     "rbac.yml",
 }
+
+
+def _find_fastapi_entrypoint(root: Path) -> str:
+    """Find the exact FastAPI application entrypoint (module:attr)."""
+    # 1. Search for uvicorn.run("...", ...) in startup scripts
+    for fname in ("main.py", "app.py", "run.py", "server.py", "wsgi.py", "asgi.py"):
+        fpath = root / fname
+        if fpath.exists():
+            text = _read_text(fpath)
+            m = re.search(r'uvicorn\.run\(\s*["\']([^"\']+)["\']', text)
+            if m:
+                return m.group(1).strip()
+
+    # 2. Search for variable = FastAPI(...) in common and discovered Python files
+    candidates: list[Path] = [
+        root / "app" / "main.py",
+        root / "app" / "api.py",
+        root / "app" / "app.py",
+        root / "src" / "main.py",
+        root / "src" / "app.py",
+        root / "src" / "api.py",
+        root / "main.py",
+        root / "app.py",
+        root / "api.py",
+    ]
+    for folder in (root, root / "app", root / "src", root / "api"):
+        if folder.is_dir():
+            for f in folder.glob("*.py"):
+                if f not in candidates and f.is_file():
+                    candidates.append(f)
+
+    for fpath in candidates:
+        if fpath.is_file():
+            text = _read_text(fpath)
+            m = re.search(r'(?m)^([a-zA-Z0-9_]+)\s*=\s*(?:[a-zA-Z0-9_]+\.)?FastAPI\(', text)
+            if m:
+                var_name = m.group(1)
+                try:
+                    rel = fpath.relative_to(root).with_suffix("")
+                    mod_name = ".".join(rel.parts)
+                    return f"{mod_name}:{var_name}"
+                except ValueError:
+                    pass
+
+    # 3. Fallbacks
+    if (root / "app" / "main.py").exists():
+        return "app.main:app"
+    if (root / "main.py").exists():
+        return "main:app"
+    return "app.main:app"
 
 
 class RepositoryAnalysis(BaseModel):
@@ -75,30 +126,21 @@ def _detect_python(root: Path, names: set[str]) -> RepositoryAnalysis | None:
         if (root / fname).exists():
             blob += _read_text(root / fname).lower() + "\n"
 
-    for candidate in (
-        root / "main.py",
-        root / "app.py",
-        root / "app" / "main.py",
-        root / "src" / "main.py",
-    ):
-        if candidate.exists():
-            blob += _read_text(candidate).lower() + "\n"
+    for candidate_dir in (root, root / "app", root / "src", root / "api"):
+        if candidate_dir.is_dir():
+            for py_path in candidate_dir.glob("*.py"):
+                blob += _read_text(py_path).lower() + "\n"
 
     port = 8000
     if "fastapi" in blob:
         framework = "FastAPI"
-        if (root / "app" / "main.py").exists():
-            entrypoint = "app.main:app"
-        elif (root / "main.py").exists():
-            entrypoint = "main:app"
-        else:
-            entrypoint = "app.main:app"
+        entrypoint = _find_fastapi_entrypoint(root)
     elif "django" in blob or "manage.py" in names:
         framework = "Django"
         entrypoint = "manage.py"
     elif "flask" in blob:
         framework = "Flask"
-        entrypoint = "app:app" if (root / "app.py").exists() else "wsgi:app"
+        entrypoint = "app:app" if (root / "app.py").exists() else ("app.main:app" if (root / "app" / "main.py").exists() else "wsgi:app")
         port = 5000
     else:
         framework = "Python"

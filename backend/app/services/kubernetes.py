@@ -171,6 +171,15 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def find_active_service(service: str, namespace: str) -> str:
+    """Find the exact existing service name in the namespace (handling -staging or -green suffixes)."""
+    for candidate in (service, f"{service}-staging", f"{service}-green", f"{service}-nodeport"):
+        proc = _run(["kubectl", "get", "svc", candidate, "-n", namespace, "-o", "name"], timeout=5)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return candidate
+    return service
+
+
 def get_service_port(service: str, namespace: str) -> int:
     proc = _run(
         [
@@ -188,31 +197,34 @@ class PortForwardManager:
         self._processes: dict[str, tuple[int, subprocess.Popen]] = {}
 
     def get_port(self, service: str, namespace: str) -> int:
-        key = f"{namespace}/{service}"
+        active_service = find_active_service(service, namespace)
+        key = f"{namespace}/{active_service}"
         if key in self._processes:
             port, proc = self._processes[key]
             if proc.poll() is None:
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        s.settimeout(0.3)
-                        if s.connect_ex(("127.0.0.1", port)) == 0:
-                            return port
-                except Exception:
-                    pass
+                for _ in range(3):
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                            s.settimeout(0.5)
+                            if s.connect_ex(("127.0.0.1", port)) == 0:
+                                return port
+                    except Exception:
+                        pass
+                    time.sleep(0.2)
                 try:
                     proc.terminate()
                 except Exception:
                     pass
 
         local_port = _free_port()
-        svc_port = get_service_port(service, namespace)
+        svc_port = get_service_port(active_service, namespace)
         proc = subprocess.Popen(
             [
                 "kubectl",
                 "port-forward",
                 "-n",
                 namespace,
-                f"svc/{service}",
+                f"svc/{active_service}",
                 f"{local_port}:{svc_port}",
                 "--address=0.0.0.0",
             ],
@@ -221,7 +233,17 @@ class PortForwardManager:
             text=True,
             env={**os.environ, **({"KUBECONFIG": settings.kubeconfig} if settings.kubeconfig else {})},
         )
-        time.sleep(1.2)
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.3)
+                    if s.connect_ex(("127.0.0.1", local_port)) == 0:
+                        break
+            except Exception:
+                pass
+            time.sleep(0.2)
+
         self._processes[key] = (local_port, proc)
         return local_port
 

@@ -37,6 +37,9 @@ export type Analysis = {
   has_dockerfile: boolean;
   security_score: number | null;
   analysis_result: Record<string, unknown> | null;
+  is_multiservice?: boolean;
+  detected_services?: string[];
+  multiservice_notice?: string | null;
   created_at: string;
 };
 

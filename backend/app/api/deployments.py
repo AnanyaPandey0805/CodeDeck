@@ -1,8 +1,9 @@
 import logging
+import re
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.agents.deployment_agent import (
@@ -298,6 +299,7 @@ async def preview_app(project_id: int, request: Request, subpath: str = "", db: 
     project = _get_project(project_id, db)
     app_name = sanitize_name(project.repository_name or "app")
     namespace = settings.k8s_namespace
+    preview_prefix = f"/api/projects/{project_id}/preview"
 
     try:
         local_port = k8s_svc.port_forward_manager.get_port(app_name, namespace)
@@ -320,14 +322,60 @@ async def preview_app(project_id: int, request: Request, subpath: str = "", db: 
                 content=body if body else None,
                 follow_redirects=False,
             )
+
+            # If user requested root / and it returned 404 (very common for APIs), check /docs
+            if cleaned_subpath in ("", "/") and resp.status_code == 404 and request.method == "GET":
+                try:
+                    docs_check = await client.get(f"http://127.0.0.1:{local_port}/docs", timeout=2.0)
+                    if docs_check.status_code < 400:
+                        return RedirectResponse(url=f"{preview_prefix}/docs", status_code=307)
+                except Exception:
+                    pass
+
             # Filter hop-by-hop headers
-            excluded = {"content-encoding", "transfer-encoding", "connection"}
+            excluded = {"content-encoding", "transfer-encoding", "connection", "content-length"}
             resp_headers = {k: v for k, v in resp.headers.items() if k.lower() not in excluded}
+
+            # Rewrite redirects
+            if "location" in resp_headers:
+                loc = resp_headers["location"]
+                if loc.startswith("/") and not loc.startswith(preview_prefix):
+                    resp_headers["location"] = f"{preview_prefix}{loc}"
+
+            content_type = resp.headers.get("content-type", "")
+            response_bytes = resp.content
+
+            # Rewrite HTML so Swagger UI / ReDoc and relative links point to the preview proxy
+            if "text/html" in content_type:
+                try:
+                    html_text = resp.text
+                    base_tag = f'<base href="{preview_prefix}/">'
+                    if "<head>" in html_text:
+                        html_text = html_text.replace("<head>", f"<head>\n    {base_tag}", 1)
+                    elif "<HEAD>" in html_text:
+                        html_text = html_text.replace("<HEAD>", f"<HEAD>\n    {base_tag}", 1)
+
+                    # Rewrite Swagger UI / ReDoc URL configs
+                    html_text = re.sub(
+                        r"""(\burl\s*:\s*['"])/(?!api/projects/\d+/preview/)""",
+                        rf"\1{preview_prefix}/",
+                        html_text,
+                    )
+                    html_text = re.sub(
+                        r"""(\boauth2RedirectUrl\s*:\s*['"])/(?!api/projects/\d+/preview/)""",
+                        rf"\1{preview_prefix}/",
+                        html_text,
+                    )
+                    response_bytes = html_text.encode("utf-8")
+                except Exception:
+                    pass
+
+            resp_headers["content-length"] = str(len(response_bytes))
             return Response(
-                content=resp.content,
+                content=response_bytes,
                 status_code=resp.status_code,
                 headers=resp_headers,
-                media_type=resp.headers.get("content-type"),
+                media_type=content_type,
             )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Proxy error: {exc}")
