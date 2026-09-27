@@ -1,75 +1,48 @@
-# DeployMind Troubleshooting Guide
+# CodeDeck Troubleshooting Guide
 
-This document provides practical fixes for common errors encountered when using DeployMind locally.
+This document provides practical solutions for common issues encountered during setup, operation, or local Kubernetes deployment in CodeDeck.
 
 ---
 
-### Docker unavailable
-**Symptom**: `docker: command not found` or `Cannot connect to the Docker daemon`.
-**Fix**: Ensure Docker Desktop or Docker Engine is installed and running. If running DeployMind inside a container, ensure `/var/run/docker.sock` is correctly mounted in the `docker-compose.yml`.
+## 1. Docker & Container Issues
 
-### Docker Hub unavailable / Rate Limited
-**Symptom**: Docker build fails with `toomanyrequests: You have reached your pull rate limit`.
-**Fix**: Log into Docker Hub (`docker login`) to increase your pull rate limits, or use an authenticated Docker Hub proxy.
+### Symptom: `Docker daemon unavailable`
+- **Cause**: Docker Engine / Docker Desktop is not running on the host system, or the backend container cannot access `/var/run/docker.sock`.
+- **Fix**:
+  1. Start Docker Desktop or run `sudo systemctl start docker` on Linux.
+  2. Verify access by running `docker info` in your terminal.
+  3. If running via Docker Compose, ensure the `/var/run/docker.sock` volume mount is active.
 
-### kind missing
-**Symptom**: `kind: command not found`.
-**Fix**: Install `kind` from [kind.sigs.k8s.io](https://kind.sigs.k8s.io/docs/user/quick-start/#installation).
+### Symptom: `Docker build timeout (1800s exceeded)`
+- **Cause**: Heavy dependency installation (e.g. compiling large C extensions or downloading massive packages) exceeded the default timeout.
+- **Fix**: Increase `DOCKER_BUILD_TIMEOUT` in your `.env` file or optimize the repository's `requirements.txt` / `package.json`.
 
-### kind cluster missing
-**Symptom**: `Kubernetes cluster 'deploymind' is unavailable. Create or start the kind cluster`.
-**Fix**: Create the local cluster:
-```bash
-kind create cluster --name deploymind
-```
+---
 
-### Kubernetes API timeout
-**Symptom**: `kubectl cluster-info` times out after 10 seconds.
-**Fix**: The `kind` container may be paused, stopped, or experiencing network issues. Restart it via Docker Desktop, or recreate it:
-```bash
-kind delete cluster --name deploymind
-kind create cluster --name deploymind
-```
+## 2. Kubernetes (`kind`) Issues
 
-### kubeconfig problem
-**Symptom**: `The connection to the server localhost:8080 was refused`.
-**Fix**: Ensure your `~/.kube/config` exists and is mounted correctly. Run `kubectl cluster-info --context kind-deploymind` on your host to populate the kubeconfig, then restart DeployMind.
+### Symptom: `Kind cluster 'deploymind' unavailable`
+- **Cause**: The local Kubernetes cluster has not been created yet.
+- **Fix**: Run the following command to provision the cluster:
+  ```bash
+  kind create cluster --name deploymind
+  ```
 
-### Docker build timeout
-**Symptom**: `Docker build timed out after 1800 seconds`.
-**Fix**: The repository's build took longer than the configured timeout (default 30 mins). Increase `DOCKER_BUILD_TIMEOUT` in `.env` and retry. Ensure the Docker daemon has sufficient CPU/Memory allocated.
+### Symptom: `ImagePullBackOff` or `ErrImagePull`
+- **Cause**: Kubernetes is trying to pull the image from a remote registry instead of using the local image loaded into `kind`.
+- **Fix**: Ensure the generated manifest has `imagePullPolicy: Never` for local `kind` deployments. CodeDeck automatically patches manifests for local cluster compatibility.
 
-### Docker build context error
-**Symptom**: `COPY failed: file not found in build context`.
-**Fix**: The Dockerfile attempts to copy files that are outside of its directory. DeployMind automatically detects root-level config files (like `package.json` or `pyproject.toml`) and sets the context to the repository root. Ensure the repository's file structure is standard.
+---
 
-### Image not found in Kubernetes
-**Symptom**: Pod status shows `ErrImagePull` or `ImagePullBackOff`.
-**Fix**: Ensure the `imagePullPolicy` in the manifest is set to `Never` (DeployMind patches this automatically). Check that the image was successfully loaded into `kind` via `kind load docker-image`.
+## 3. Backend & Database Issues
 
-### Pod crash
-**Symptom**: Pod status shows `CrashLoopBackOff`.
-**Fix**: Check the pod logs for application startup errors:
-```bash
-kubectl logs -l app=<app-name> -n deploymind
-```
-Common causes include missing environment variables or failing database connections.
+### Symptom: `PostgreSQL connection failed`
+- **Cause**: The database container is starting up or port 5433/5432 is blocked.
+- **Fix**:
+  1. Check database container status: `docker compose ps db`.
+  2. Inspect DB logs: `docker compose logs db`.
+  3. Verify `DATABASE_URL` in `.env`.
 
-### Rollout failure
-**Symptom**: `deployment "<app-name>" exceeded its progress deadline`.
-**Fix**: The pod crashed during startup or the readiness probe failed. Inspect the pod description and logs:
-```bash
-kubectl describe pod -l app=<app-name> -n deploymind
-```
-
-### Smoke test failure
-**Symptom**: `port-forward exited early` or HTTP endpoints return `502`/`504`.
-**Fix**: The application started, but the `/health`, `/`, or `/docs` endpoints are not responding on the expected port. Verify that the application binds to `0.0.0.0` and that the correct port is exposed in the Dockerfile.
-
-### Frontend 504 Gateway Timeout
-**Symptom**: The browser network tab shows `504 Gateway Timeout` when clicking "Deploy".
-**Fix**: The deployment took too long, and the proxy timed out. DeployMind has been updated to use asynchronous background tasks to fix this. Ensure you are running the latest backend code.
-
-### Database connection failure
-**Symptom**: `psycopg.OperationalError: connection to server at "db" failed`.
-**Fix**: Ensure the PostgreSQL container is running: `docker compose ps`. Check if the `DATABASE_URL` in `.env` matches the docker-compose service configuration.
+### Symptom: `HTTP 504 Gateway Timeout on Analyze or Deploy`
+- **Cause**: Long-running operations like cloning or building images ran synchronously on host HTTP requests.
+- **Fix**: CodeDeck uses FastAPI `BackgroundTasks` for deployments. Status can be polled asynchronously via `/api/projects/{id}/pipeline` or `/api/projects/{id}`.

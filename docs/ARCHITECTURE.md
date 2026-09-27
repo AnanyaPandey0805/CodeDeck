@@ -1,131 +1,136 @@
----
-title: CodeDeck — Architecture (Midsem)
----
+# CodeDeck — System Architecture
 
-# Architecture
+CodeDeck is an AI-assisted software development and DevOps platform. This document outlines the current system architecture, components, workflows, and database schemas.
 
-## Component Overview
+## Component Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Browser                                                    │
-│  React + Vite (port 3000)                                  │
-│  IDE-style dashboard with 8 pages                          │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ HTTP REST
-┌──────────────────────▼──────────────────────────────────────┐
-│  FastAPI Backend (port 8000)                                │
-│                                                             │
-│  Routers                                                    │
-│  ├── /api/projects   — CRUD, list                          │
-│  ├── /api/projects/{id}/analyze  — workflow trigger        │
-│  ├── /api/projects/{id}/qa       — RAG Q&A                 │
-│  ├── /api/projects/{id}/ai-tests — AI test generation      │
-│  ├── /api/projects/{id}/deploy/* — staging/production      │
-│  ├── /api/projects/{id}/pipeline — pipeline steps          │
-│  └── /api/system/status          — system health           │
-│                                                             │
-│  LangGraph Workflow (Analysis pipeline)                     │
-│  ├── clone_and_analyze           → repository_agent.py     │
-│  ├── repository_intelligence     → repository_ai.py        │
-│  ├── run_tests                   → testing_agent.py        │
-│  ├── security_scan               → security_agent.py       │
-│  ├── generate_docker             → docker_agent.py         │
-│  └── generate_kubernetes         → kubernetes_agent.py     │
-│                                                             │
-│  Services                                                   │
-│  ├── github.py        — clone, validate URL                │
-│  ├── docker.py        — docker build, kind load            │
-│  ├── kubernetes.py    — apply, rollout, smoke test         │
-│  ├── repository_ai.py — RAG index, search, LLM Q&A        │
-│  └── pipeline.py      — upsert pipeline steps              │
-└──────┬───────────────────────┬─────────────────────────────┘
-       │                       │
-┌──────▼──────┐      ┌────────▼────────────────────────────┐
-│ PostgreSQL  │      │  Local Filesystem Workspace          │
-│ (port 5432) │      │  /tmp/deploymind/                   │
-│             │      │  ├── project_{id}/    (cloned repo) │
-│  projects   │      │  ├── generated/       (index, files)│
-│  analyses   │      │  └── kubeconfig                     │
-│  deployments│      └──────────────┬──────────────────────┘
-│  pipeline   │                     │
-│  generated  │      ┌──────────────▼──────────────────────┐
-│  files      │      │  Docker / kind                      │
-└─────────────┘      │  ├── Docker daemon (via socket)     │
-                     │  ├── kind cluster (deploymind)       │
-                     │  └── kubectl → K8s API              │
-                     └────────────────────────────────────-┘
+```text
++----------------+      +-------------------+      +-----------------------+
+|                |      |                   |      |                       |
+|   Browser /    +----->+  Nginx (Frontend) +----->+ FastAPI (Backend)     |
+|   Client       |      |                   |      |                       |
++----------------+      +-------------------+      +----+---------+--------+
+                                                        |         |
+                                                        v         v
+                                           +------------+--+   +--+------------+
+                                           |               |   |               |
+                                           | PostgreSQL    |   | Docker & kind |
+                                           | (Relational)  |   | (Deployment)  |
+                                           +---------------+   +---------------+
 ```
 
-## Analysis Pipeline (LangGraph)
+## Backend Router Structure
 
-```
-clone_and_analyze
-    ↓
-repository_intelligence    (index files, generate recommendation)
-    ↓
-run_tests                  (detect and run existing tests)
-    ↓
-security_scan              (basic pattern scan)
-    ↓
-generate_docker            (use or generate Dockerfile)
-    ↓
-generate_kubernetes        (generate Deployment + Service YAML)
-```
+The backend exposes several modular routers to handle different domains of the platform:
 
-## RAG Pipeline
+- `POST /projects/`: Create a new project integration.
+- `GET /projects/`: List all projects.
+- `GET /projects/{project_id}`: Retrieve project details.
+- `POST /projects/{project_id}/analyze`: Trigger repository analysis.
+- `GET /projects/{project_id}/status`: Check analysis and deployment status.
+- `POST /projects/{project_id}/qa`: Interact with the RAG Q&A system.
+- `POST /projects/{project_id}/tests`: Generate AI tests for the project.
+- `POST /projects/{project_id}/deploy`: Trigger staging deployment (Docker & Kubernetes).
+- `GET /health`: System health and status check.
 
-```
-Repository files
-    ↓ _iter_repository_files() — skip binaries, skip .git etc.
-    ↓ _chunk_text()            — split into ~1400 char chunks with overlap
-    ↓ _hash_embedding()        — SHA-256 per token → 192-dim vector
-    ↓ save to repository_index.json (cached per project)
-    ↓
-Query
-    ↓ _hash_embedding(query)
-    ↓ cosine similarity against all chunks
-    ↓ top-K results
-    ↓ → LLM prompt (or heuristic if no API key)
-    ↓ → Answer + sources
+## Core Workflow (LangGraph Pipeline)
+
+The system orchestrates operations using a LangGraph sequential pipeline. Each node represents a distinct phase of the project processing lifecycle.
+
+```text
+[Analyze] -> [Intelligence] -> [Tests] -> [Security] -> [Docker] -> [Kubernetes]
 ```
 
-## Deployment Pipeline
+1. **Analyze**: Clones the repository, analyzes structure, and extracts metadata.
+2. **Intelligence**: Builds the semantic RAG index (chunking, hash embeddings).
+3. **Tests**: Identifies application endpoints and generates test suites (FastAPI/Flask).
+4. **Security**: Scans for secrets, Dockerfile root-user issues, and Kubernetes privileges.
+5. **Docker**: Builds the application container image.
+6. **Kubernetes**: Loads the image into the local `kind` cluster and applies manifests.
 
-```
-Deploy Staging button
-    → background task
-    → clone repo (or use cache)
-    → sanitize requirements
-    → docker build (use existing or generated Dockerfile)
-    → kind load docker-image
-    → kubectl apply (Deployment + Service)
-    → kubectl rollout status (wait up to 4 min)
-    → smoke test (port-forward → HTTP)
-    → store result in DB
-    → update pipeline steps
-```
+## RAG Pipeline Detail
 
-## Key Design Decisions
+Our Retreival-Augmented Generation pipeline powers the intelligent Q&A and analysis features:
 
-| Decision | Rationale |
-|----------|-----------|
-| Local hash embeddings | No external embedding API required; fast, deterministic |
-| LangGraph workflow | Clean node-by-node pipeline with conditional edges |
-| kind (not cloud K8s) | Runs on a single laptop; no cloud credentials required |
-| PostgreSQL | JSONB columns store flexible analysis results |
-| Background tasks | Deployment is long-running; FastAPI BackgroundTasks avoid HTTP timeout |
-| Heuristic fallback | If no OpenAI key, deterministic answers are returned — app still works |
+1. **File Selection**: Identifies relevant source code and documentation files.
+2. **Chunking**: Splits files into manageable context windows.
+3. **Hash Embeddings**: Generates 192-dimensional hash-based embeddings for chunks.
+4. **Cosine Search**: Computes cosine similarity between the user query and chunk embeddings.
+5. **Context Assembly**: Retrieves the highest-scoring chunks.
+6. **LLM Invocation**: Passes the context and query to OpenAI `gpt-4.1-mini`.
+7. **Answer Generation**: Returns the synthesized answer to the user.
 
-## Current Midsem Scope
+## Deployment Pipeline Detail
 
-- GitHub → Analysis → RAG → Q&A → AI Testing → Docker → kind → Smoke Test
+The DevOps automation pipeline executes the following sequence:
 
-## Not Yet Implemented (Future Scope)
+1. **Clone**: Fetches the latest source code from the repository.
+2. **Sanitize**: Ensures the workspace is clean and ready.
+3. **Docker Build**: Builds the container image using the detected or provided Dockerfile.
+4. **Kind Load**: Loads the built image into the local `kind` (Kubernetes in Docker) cluster.
+5. **Kubectl Apply**: Generates and applies Kubernetes manifests (Deployment, Service).
+6. **Rollout**: Waits for the deployment rollout to complete successfully.
+7. **Smoke Test**: Verifies application health via a temporary `port-forward`.
 
-- Cloud Kubernetes (GKE, EKS, AKS)
-- Prometheus / Grafana monitoring
-- GitHub Actions CI/CD
-- Advanced blue-green (separate from staging — midsem)
-- Security scanning (beyond basic pattern detection)
-- Node.js / Java AI test generation
+## Database Schema
+
+The platform uses PostgreSQL with SQLAlchemy for data persistence.
+
+| Table | Purpose |
+|-------|---------|
+| `Project` | Stores project metadata, repository URLs, and current state. |
+| `Analysis` | Records the outcome of the repository analysis phase. |
+| `Deployment` | Tracks deployment attempts, environment status, and URLs. |
+| `PipelineStep` | Logs granular details, status, and output of each pipeline node. |
+| `GeneratedFile` | Stores AI-generated artifacts such as tests, manifests, and scripts. |
+
+## Configuration
+
+System settings are managed via `config.py`, loading variables from the environment:
+- `DATABASE_URL`: PostgreSQL connection string.
+- `OPENAI_API_KEY`: Key for LLM services.
+- `WORKSPACE_DIR`: Local directory for cloning and processing repositories.
+- `KIND_CLUSTER_NAME`: Name of the local `kind` cluster.
+
+## Security Model
+
+**Currently Implemented:**
+- Regex-based secret scanning in repositories.
+- Dockerfile non-root user verification.
+- Kubernetes manifest privilege checks.
+- Environment variable filtering to prevent credential leakage.
+
+**Not Yet Implemented (Future Scope):**
+- User authentication and authorization.
+- Role-Based Access Control (RBAC).
+- Multi-tenant data isolation at the database level.
+
+## Extension Points
+
+The architecture is designed for extensibility:
+- **Language Support**: Adding new languages requires extending the `Analyze` node parsers.
+- **LLM Providers**: The RAG pipeline abstracts embedding and generation, allowing integration with other models.
+- **Deployment Targets**: Additional environments (e.g., AWS, GCP) can be added as new nodes in the LangGraph pipeline.
+
+## Design Decisions
+
+| Technology | Reason for Selection |
+|------------|----------------------|
+| **FastAPI** | High performance, async support, and auto-generated OpenAPI documentation. |
+| **React & Vite** | Fast build times, robust ecosystem, and modular component design. |
+| **LangGraph** | Provides a resilient, stateful workflow execution engine for complex pipelines. |
+| **Kind** | Lightweight, local Kubernetes testing without cloud infrastructure costs. |
+| **Hash Embeddings** | Deterministic, fast, and completely local embedding generation for source code. |
+
+## Current vs. Future Scope
+
+**Current Scope:**
+- Full pipeline execution for supported Python frameworks (FastAPI, Flask) and standard Dockerfiles.
+- Local Kubernetes deployment via `kind`.
+- AI-assisted Q&A and test generation.
+
+**Future Scope:**
+- Cloud provider integrations (EKS, GKE, AKS).
+- Advanced static application security testing (SAST).
+- Full CI/CD integration with GitHub Actions / GitLab CI.
+- Multi-user collaboration features.

@@ -1,92 +1,102 @@
-# DeployMind AI Pipeline
+# CodeDeck — AI & RAG Pipeline
 
-## 1. Repository Analysis
-
-DeployMind starts with deterministic repository analysis:
-
-- detect language
-- detect framework
-- detect package manager
-- detect entrypoint
-- detect test command
-- detect Dockerfile / Kubernetes presence
-- detect multi-service repository shape
-
-## 2. Repository RAG
-
-The repository intelligence layer uses a lightweight local RAG pipeline:
+This document details the core artificial intelligence and Retrieval-Augmented Generation (RAG) pipelines powering CodeDeck's intelligent features. The pipeline transforms raw codebase data into actionable insights, automated testing, and deployment guidance.
 
 ```text
-Clone repository
-  -> read code/docs
-  -> split into chunks
-  -> build local hashed embeddings
-  -> persist repository index
-  -> semantic search
-  -> answer with retrieved context
+┌───────────────┐     ┌───────────────┐     ┌────────────────┐
+│   User Repo   │────▶│ Deterministic │────▶│ Repository     │
+│   (Source)    │     │   Analysis    │     │ Indexing (RAG) │
+└───────────────┘     └───────────────┘     └────────────────┘
+                                                    │
+                                                    ▼
+┌───────────────┐     ┌───────────────┐     ┌────────────────┐
+│ AI Test       │◀────│ Deployment    │◀────│ Semantic       │
+│ Generation    │     │ Generation    │     │ Retrieval      │
+└───────────────┘     └───────────────┘     └────────────────┘
+        │
+        ▼
+┌───────────────┐     ┌───────────────┐     ┌────────────────┐
+│ Pipeline      │────▶│ AI Failure    │────▶│ Evaluation     │
+│ Execution     │     │ Analysis      │     │ Mechanism      │
+└───────────────┘     └───────────────┘     └────────────────┘
 ```
 
-This is intentionally simple so the project stays explainable in a course viva.
+## 1. Deterministic Repository Analysis
 
-## 3. Deployment Recommendation
+Before engaging external AI models, CodeDeck performs a rapid, deterministic pass over the target repository. This step uses heuristics to extract hard truths about the codebase without incurring API latency or costs.
 
-DeployMind combines:
+*   **Language Detection:** Scans for standard file extensions (e.g., `.py`, `.js`, `.go`).
+*   **Framework Detection:** Inspects dependency files (`requirements.txt`, `package.json`, `go.mod`) for known framework signatures (FastAPI, Flask, Express, React).
+*   **Port Detection:** Utilizes regex matching on entrypoint files to identify listening ports (e.g., `app.run(port=8080)`).
+*   **Entrypoint Detection:** Identifies the primary execution script (e.g., `main.py`, `app.js`).
 
-- repository analysis signals
-- indexed repository evidence
-- route and health detection
-- database hints
+These signals serve as a reliable fallback and provide highly structured context for subsequent LLM prompts.
 
-to generate a grounded deployment recommendation with:
+## 2. Repository Indexing
 
-- detected stack
-- likely issues
-- recommended next steps
-- supporting evidence
+To provide the LLM with relevant context from the repository, CodeDeck builds a searchable local index.
 
-## 4. AI Testing
+1.  **File Selection:** The system filters out non-text files, binaries, and ignored directories (e.g., `node_modules`, `.git`, `.venv`) to ensure only relevant source code and documentation are processed.
+2.  **Chunking:** Files are divided into smaller segments. CodeDeck uses a chunk size of approximately 1400 characters with an overlap of 220 characters. The overlap ensures that context isn't lost if an important function or thought spans across a chunk boundary.
+3.  **Vectorization (Hashing):**
+    *   *Implementation Note:* CodeDeck currently implements a lightweight, dependency-free embedding strategy. It uses term-frequency hashing based on SHA-256 mapped to a 192-dimensional vector.
+    *   *Honesty Declaration:* This is a deterministic frequency hash, not a dense semantic embedding model (like those produced by transformers). It excels at exact keyword overlap but does not understand abstract semantic similarity (e.g., it won't inherently know that "create" and "build" are related).
+4.  **Storage:** The chunks and their corresponding vector representations are stored locally in a `repo_index.json` file.
 
-DeployMind has two testing layers:
+## 3. Semantic Retrieval
 
-- run the repository's existing detected test command
-- generate a very small set of route-focused tests for supported FastAPI and Flask repositories
+When a user asks a question or a process requires context, CodeDeck searches the generated index.
 
-If the generated tests fail, DeployMind returns a short explanation of the likely reason based on logs and error text.
+*   The user's query is vectorized using the same SHA-256 hashing mechanism.
+*   The system performs a Cosine Similarity Search, comparing the query vector against all chunk vectors in the index.
+*   The Top-K most similar chunks (highest cosine similarity scores) are retrieved.
 
-## 5. Deployment Failure Analysis
+## 4. AI Q&A Workflow
 
-When deployment fails, DeployMind collects:
+The RAG workflow answers user queries contextually.
 
-- deployment error text
-- pod and deployment status
-- recent logs when possible
+1.  **Context Retrieval:** Relevant chunks are fetched via semantic search.
+2.  **Prompt Assembly:** The system constructs a strict prompt (referencing strategies defined in `prompts.py`). It injects the user's question and the retrieved codebase chunks.
+3.  **LLM Execution:** The prompt is sent to `gpt-4o-mini` (or similar configured model).
+4.  **Grounding:** The prompt strictly instructs the LLM to base its answer *only* on the provided context and to cite its sources.
+5.  **Fallback Mechanism:** If the OpenAI API key is unavailable, the system gracefully falls back to deterministic heuristic responses based on the initial analysis step, ensuring the platform remains functional offline.
 
-It then produces:
+## 5. Deployment Recommendation
 
-- likely cause
-- evidence
-- safest suggested fix
+CodeDeck leverages AI to determine the optimal deployment strategy.
 
-If evidence is weak, the system falls back to an explicit insufficient-information answer instead of guessing.
+*   The deterministic signals (language, framework, ports) and relevant file chunks (like `Dockerfile` if it exists, or `requirements.txt`) are passed to the LLM.
+*   The LLM is prompted to output deployment guidance, specifically identifying missing infrastructure components (like generating a missing Dockerfile or standard Kubernetes manifests).
 
-## 6. Evaluation
+## 6. AI Test Generation
 
-DeployMind evaluates the retrieval layer with predefined questions such as:
+CodeDeck automates testing to validate deployment stability.
 
-- What framework does this repository use?
-- What language does this repository use?
-- What package manager does this repository use?
-- What is the deployment entrypoint?
-- What port does the application use?
+1.  **Route Detection:** Heuristics or AI identify API routes in the codebase.
+2.  **Generation Prompt:** The LLM receives the route definitions and is instructed to generate testing code (specifically utilizing the `pytest` framework for Python projects).
+3.  **Execution Environment:** The generated tests are saved to disk (e.g., `test_app.py`).
+4.  **Subprocess Execution:** CodeDeck invokes a secure subprocess to run the `pytest` command. *The LLM does not execute the code.*
+5.  **Parsing:** The standard output and standard error from the test runner are captured for analysis.
 
-The output is a small report with total questions, relevant/correct answers, and retrieval accuracy.
+## 7. Deployment Failure Analysis
 
-## Prompt Organization
+When an infrastructure task fails, AI accelerates the debugging process.
 
-Prompt definitions are kept in `backend/app/core/prompts.py` for:
+*   **Trigger:** A Docker build failure or a Kubernetes Pod crash (e.g., CrashLoopBackOff).
+*   **Data Collection:** CodeDeck orchestrates the collection of raw error data, capturing Docker build logs or retrieving Pod logs via `kubectl logs`.
+*   **Analysis Prompt:** The error trace, along with relevant codebase context (like the entrypoint script or Dockerfile), is sent to the LLM.
+*   **Resolution:** The LLM responds with a root cause analysis and a proposed fix, significantly reducing Mean Time To Resolution (MTTR).
 
-- repository analysis wording
-- RAG Q&A
-- deployment recommendation
-- test generation
-- deployment failure analysis
+## 8. Evaluation Mechanism
+
+To ensure the reliability of the RAG pipeline, CodeDeck includes a built-in evaluation protocol.
+
+*   The system defines a standard set of 5 evaluation questions (e.g., "What are the core dependencies?", "What port does the application use?").
+*   These questions are run automatically against the generated index.
+*   The quality of the retrieved chunks (relevance) and the final LLM answers are evaluated to track pipeline performance and tune chunking/hashing parameters.
+
+## Future Extension Points
+
+*   **Dense Semantic Embeddings:** Migrating from the current SHA-256 frequency hashing to a dedicated local embedding model (e.g., via `sentence-transformers`) to enable true semantic understanding.
+*   **Hybrid Search:** Implementing BM25 keyword search alongside dense vector search.
+*   **Agentic Workflows:** Allowing the AI not just to recommend fixes, but to execute code edits and retry failed deployments autonomously.

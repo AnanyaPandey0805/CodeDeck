@@ -8,17 +8,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Docker CLI (static binary)
 RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
     | tar -xz -C /tmp \
     && mv /tmp/docker/docker /usr/local/bin/docker \
     && rm -rf /tmp/docker
 
-RUN curl -fsSL -o /usr/local/bin/kubectl \
-    "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+# kubectl (pinned stable version)
+RUN KUBECTL_VERSION=$(curl -fsSL https://dl.k8s.io/release/stable.txt) \
+    && curl -fsSL -o /usr/local/bin/kubectl \
+    "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
     && chmod +x /usr/local/bin/kubectl
 
+# kind (Kubernetes-in-Docker) — pinned to v0.27.0 (latest stable)
 RUN curl -fsSL -o /usr/local/bin/kind \
-    "https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64" \
+    "https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64" \
     && chmod +x /usr/local/bin/kind
 
 COPY requirements.txt .

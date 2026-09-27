@@ -1,52 +1,22 @@
-# DeployMind — Viva & Technical Interview Notes
+# CodeDeck — Technical Reference Notes
 
-Quick-reference answers for university project viva evaluations and technical interviews.
-
----
-
-### Q1: What problem does DeployMind solve?
-**Answer**: DeployMind bridges the gap between source code repositories and production Kubernetes deployments. It automates application stack detection, Docker containerization, Kubernetes manifest generation, staging verification, and Blue-Green zero-downtime traffic switching with human-in-the-loop approval.
+This document provides technical reference notes for CodeDeck. For the comprehensive defense guide containing 80+ Q&A pairs, see [`VIVA_GUIDE.md`](file:///d:/agent/docs/VIVA_GUIDE.md).
 
 ---
 
-### Q2: Why use `kind` (Kubernetes in Docker) instead of Minikube or Cloud K8s?
-**Answer**: `kind` runs lightweight Kubernetes nodes as Docker containers on the developer machine. It requires zero cloud infrastructure cost, provisions in seconds, and provides a real Kubernetes API server for local testing.
+## Key Architectural Reference Answers
 
----
+### Q1: What problem does CodeDeck solve?
+**Answer**: CodeDeck automates the end-to-end software delivery lifecycle for GitHub repositories. It integrates repository analysis, RAG code intelligence, AI-assisted test generation, Docker containerization, Kubernetes manifest generation, local cluster deployment, and rollout verification into a single unified control plane.
 
-### Q3: How does DeployMind prevent long-running deployment requests from timing out (HTTP 504)?
-**Answer**: DeployMind uses FastAPI `BackgroundTasks`. Deployment requests (`POST /deploy/staging`) record status as `deploying`, trigger asynchronous background execution, and immediately return HTTP 202. The frontend polls status endpoints every 3 seconds to show real-time progress without blocking connection sockets.
+### Q2: Why use `kind` instead of Minikube or Cloud Kubernetes?
+**Answer**: `kind` (Kubernetes-in-Docker) runs Kubernetes nodes as Docker containers on a single physical host. This provides a lightweight, local Kubernetes environment with fast cluster startup times and zero cloud infrastructure costs.
 
----
+### Q3: How does CodeDeck handle long-running deployment tasks?
+**Answer**: Deployment operations run asynchronously using FastAPI `BackgroundTasks`. The API returns an initial pending response immediately, allowing clients to poll `/api/projects/{id}/pipeline` or `/api/projects/{id}` for real-time progress without HTTP 504 gateway timeouts.
 
-### Q4: Explain the Blue-Green Deployment workflow in DeployMind.
-**Answer**:
-1. Current live version is `BLUE` (`spec.selector.version = blue`).
-2. A new `GREEN` deployment (`<app>-green`) is created with updated container image and 2 replicas.
-3. Automated smoke tests verify `GREEN` pod readiness.
-4. Deployment state changes to `production_awaiting_approval`.
-5. Human administrator clicks **Approve Production**.
-6. The Kubernetes Service selector is patched to `version: green` instantly routing live user traffic to `GREEN`.
-7. If an error occurs, clicking **Rollback** patches the Service selector back to `version: blue`.
+### Q4: How are Docker build contexts handled for nested projects?
+**Answer**: CodeDeck detects nested repository layouts (e.g., `backend/` or `server/`) and passes the appropriate subdirectory as the Docker build context while keeping parent context references intact.
 
----
-
-### Q5: How does Docker build context handling work for nested repositories?
-**Answer**: If a repository contains nested directories (e.g. `backend/Dockerfile`), but root-level configuration files exist (such as root `package.json` or `pyproject.toml`), DeployMind sets the Docker build context to the repository root directory while passing the exact Dockerfile path. This prevents `COPY failed: file not found` errors.
-
----
-
-### Q6: How are secrets and security handled?
-**Answer**:
-- API tokens, passwords, and `.env` files are excluded from logs.
-- Generated Dockerfiles enforce unprivileged user execution (`USER appuser`).
-- Generated Kubernetes RBAC uses least-privilege role bindings scoped strictly to target namespaces.
-- Arbitrary shell command execution is prohibited.
-
----
-
-### Q7: What are the primary project limitations?
-**Answer**:
-- Designed primarily for single-service container deployments per pipeline run (multi-service repositories transparently select the main backend service).
-- Local cluster deployment relies on `kind` running on the host Docker daemon.
-- Requires human approval before production traffic switching.
+### Q5: How are secrets protected?
+**Answer**: API keys and tokens are stored in environment variables (`.env`) and filtered out before executing tests or logging subprocess output.

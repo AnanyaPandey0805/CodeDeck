@@ -1086,14 +1086,11 @@ export default function App() {
 
               <SectionTitle>About CodeDeck</SectionTitle>
               <div className="space-y-2 rounded border border-zinc-800 bg-zinc-900/60 p-4 text-xs text-zinc-400">
-                <div><span className="text-zinc-300">Version:</span> Midsem Milestone</div>
+                <div><span className="text-zinc-300">Version:</span> 1.0.0</div>
                 <div><span className="text-zinc-300">Stack:</span> FastAPI · PostgreSQL · React · Vite · kind</div>
-                <div><span className="text-zinc-300">AI:</span> OpenAI GPT-4.1-mini · Local hash embeddings</div>
+                <div><span className="text-zinc-300">AI:</span> OpenAI GPT · Local embeddings · RAG pipeline</div>
                 <div className="pt-2 border-t border-zinc-800 text-zinc-600">
-                  Current scope: GitHub → Analysis → RAG → Q&amp;A → AI Testing → Docker → Kubernetes (kind) → Smoke Test
-                </div>
-                <div className="text-zinc-700">
-                  Future scope: CI/CD · Cloud Kubernetes · Security scanning · Observability · Blue-Green
+                  Workflow: GitHub → Analysis → RAG → Q&amp;A → AI Testing → Docker → Kubernetes → Smoke Test
                 </div>
               </div>
             </div>

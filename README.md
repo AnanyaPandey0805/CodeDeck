@@ -1,107 +1,66 @@
 # CodeDeck — AI-Assisted Software Development & DevOps Platform
 
-CodeDeck takes a GitHub repository through a complete AI-assisted delivery pipeline: repository analysis, semantic code retrieval, AI Q&A, AI-assisted test generation, Docker build, Kubernetes (kind) deployment, and smoke test — all from a single developer IDE-style dashboard.
+CodeDeck is an integrated platform that accelerates software development by combining AI-driven code analysis, intelligent RAG Q&A, and automated Kubernetes deployments.
 
-## Workflow
+## Core Workflow
 
-```
-GitHub Repository
-    ↓
-Repository Analysis      (language, framework, port, entry point, Dockerfile)
-    ↓
-Repository Indexing      (chunking, hash embeddings, local semantic index)
-    ↓
-AI Repository Q&A        (RAG — retrieve → LLM → grounded answer)
-    ↓
-AI Test Generation       (FastAPI / Flask — generate → pytest → PASS/FAIL)
-    ↓
-Deployment Recommendation (grounded from repository context)
-    ↓
-Docker Build             (use existing Dockerfile or generate one)
-    ↓
-kind Kubernetes Deploy   (Deployment + Service applied to local kind cluster)
-    ↓
-Smoke Test               (kubectl port-forward → HTTP → validate response)
-    ↓
-Result + Logs
+```text
+GitHub Repo -> Analysis -> RAG Q&A -> AI Testing -> Docker Build -> Kubernetes Deploy -> Smoke Test -> Results
 ```
 
 ## Technology Stack
 
-| Layer | Technology |
-|-------|------------|
-| Backend | Python, FastAPI, SQLAlchemy |
-| Database | PostgreSQL |
-| AI / RAG | OpenAI GPT-4.1-mini, local hash embeddings |
-| Orchestration | LangGraph workflow |
-| Containerization | Docker |
-| Kubernetes | kind (local), kubectl |
-| Frontend | React 19, TypeScript, Vite, Tailwind CSS v4 |
+| Domain | Technologies |
+|--------|--------------|
+| **Backend** | FastAPI, Python, PostgreSQL (SQLAlchemy), LangGraph |
+| **Frontend** | React 19, TypeScript, Vite, Tailwind CSS v4 |
+| **AI / NLP** | OpenAI `gpt-4.1-mini`, Hash-based Embeddings (192-dim), Cosine Similarity |
+| **DevOps** | Docker, kind (Kubernetes in Docker), kubectl |
 
 ## Quick Start
 
 ### Prerequisites
+- Docker & Docker Compose
+- `kind` CLI installed
+- `kubectl` CLI installed
+- OpenAI API Key
 
-- Docker Desktop (with Docker socket available)
-- [kind](https://kind.sigs.k8s.io/) installed
-- kubectl installed
-- An OpenAI API key (optional but required for LLM-enhanced answers)
+### Setup Instructions
 
-### 1. Create kind cluster
+1. **Ensure the kind cluster is running:**
+   ```bash
+   kind create cluster --name codedeck-cluster
+   ```
 
-```bash
-kind create cluster --name deploymind
-kubectl cluster-info --context kind-deploymind
-```
+2. **Start the platform:**
+   ```bash
+   docker compose up -d --build
+   ```
 
-### 2. Configure environment
-
-```bash
-cp .env.example .env
-# Edit .env and set OPENAI_API_KEY
-```
-
-### 3. Start the stack
-
-```bash
-docker compose up --build
-```
-
-### 4. Open the dashboard
-
-- Frontend: http://localhost:3000
-- Backend API: http://localhost:8000
-- API docs: http://localhost:8000/docs
-
-### 5. Run the demo script (PowerShell)
-
-```powershell
-.\scripts\run_demo.ps1
-```
+3. **Access the application:**
+   - Frontend Dashboard: `http://localhost:3000`
+   - Backend API Docs: `http://localhost:8000/docs`
 
 ## Supported Repository Types
 
-| Type | Analysis | AI Q&A | AI Tests | Docker | K8s |
-|------|----------|--------|----------|--------|-----|
-| Python FastAPI | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Python Flask | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Python Django | ✓ | ✓ | — | ✓ | ✓ |
-| Node.js / Express | ✓ | ✓ | — | ✓ | ✓ |
-| Java / Spring Boot | ✓ | ✓ | — | if Dockerfile present | ✓ |
-| Any repo with Dockerfile | ✓ | ✓ | — | ✓ | ✓ |
+| Framework / Environment | Support Level | Features |
+|-------------------------|---------------|----------|
+| Python (FastAPI/Flask/Django) | Excellent | Analysis, RAG, AI Tests, Auto-Deploy |
+| Node.js (Express) | Good | Analysis, RAG, Auto-Deploy |
+| Java (Spring Boot) | Good | Analysis, RAG, Auto-Deploy |
+| Generic Dockerfile | Standard | Auto-Deploy |
 
-## Documentation
+## Project Structure
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Viva Guide](docs/VIVA_GUIDE.md)
-- [Future Scope](docs/FUTURE_SCOPE.md)
+- `/backend`: FastAPI application, LangGraph workflows, and database models.
+- `/frontend`: React dashboard, Vite configuration, and Tailwind styling.
+- `/docs`: Architecture and system documentation.
+- `/scripts`: Automation and workflow scripts.
 
-## Environment Variables
+## Documentation References
 
-See [.env.example](.env.example).
+- [System Architecture](docs/ARCHITECTURE.md): Detailed component breakdown, RAG pipeline, and schemas.
 
-## Notes
+## Architecture Notes
 
-- The local kind cluster must be running before deploying.
-- LLM calls are only made for Q&A, test rationale, deployment recommendation, and failure analysis. All other detection is deterministic code.
-- The repository index is cached per project — analysis does not re-index unless you create a new project.
+CodeDeck employs a sequential LangGraph orchestration pipeline to guarantee deterministic progression from code analysis to deployment. It uses a bespoke hash-based embedding mechanism for source code indexing, enabling fast and localized RAG Q&A without excessive API overhead. Deployment is securely isolated within a local `kind` cluster, featuring automated readiness checks and rollout verifications.

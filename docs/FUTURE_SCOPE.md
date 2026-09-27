@@ -1,54 +1,16 @@
-# Future Scope — CodeDeck
+# CodeDeck — Future Scope & System Roadmap
 
-Features planned for the end-semester and beyond. **Not implemented in the midsem build.**
+This document summarizes the long-term vision and technical extension goals for **CodeDeck**. For the detailed phase-by-phase roadmap, architectural target state, and component evolution, see [`FUTURE_ROADMAP.md`](file:///d:/agent/docs/FUTURE_ROADMAP.md).
 
-## End-Semester Targets
+---
 
-### 1. GitHub Actions CI/CD
-- Trigger CodeDeck pipeline from push events
-- Status reported back to GitHub commit status API
+## Technical Extension Targets
 
-### 2. Expanded AI Test Generation
-- Node.js / Express (supertest or jest)
-- Django (pytest-django)
-- Automatic test scaffolding for common patterns
-
-### 3. Improved RAG
-- OpenAI Ada-002 or text-embedding-3-small embeddings for better accuracy
-- Re-ranking with BM25 hybrid search
-- Retrieval evaluation with automated scoring
-
-### 4. Security Scanning
-- Integration with Bandit (Python) / npm audit (Node.js)
-- Structured findings with severity, file, line
-- Block deployment on HIGH findings (configurable)
-
-### 5. Prometheus + Grafana Observability
-- Export deployment metrics to Prometheus
-- Grafana dashboards: deployment success rate, rollout duration, smoke test latency
-- Alerting on failed deployments
-
-### 6. Cloud Kubernetes
-- Support EKS, GKE, AKS via kubeconfig injection
-- Namespace-scoped deployment with RBAC
-- Image push to container registry (GHCR / ECR)
-
-### 7. Advanced Deployment Strategies
-- Full blue-green with health gate
-- Canary deployments with traffic splitting
-- Automatic rollback on failed smoke test
-
-### 8. AI DevOps Chat
-- Multi-turn conversation about repository
-- Suggest fixes from pod logs
-- Explain Kubernetes errors in plain language
-
-### 9. Multi-service Support
-- Deploy backend + frontend as separate services
-- Shared namespace, internal DNS
-- Combined smoke test across services
-
-### 10. Evaluation Metrics
-- Track retrieval accuracy over time
-- AI answer quality scoring
-- Deployment success/failure rates per repository type
+1. **Automated CI/CD Integration**: Webhook triggers for GitHub Actions, GitLab CI, and Bitbucket Pipelines for pull request verification.
+2. **Multi-Framework AI Testing**: Expanding AI test generation beyond FastAPI/Flask to Node.js/Express, Django, Java/Spring Boot, and Go.
+3. **Dense Vector Embeddings & Hybrid Search**: Upgrading local hash embeddings to dense neural embeddings (OpenAI `text-embedding-3-small` / `pgvector`) combined with BM25 keyword search and cross-encoder reranking.
+4. **Security & Vulnerability Analysis**: Static Analysis Security Testing (SAST) via Semgrep/Bandit, container scanning via Trivy, and automated CVE dependency checking.
+5. **Observability Stack**: Native OpenTelemetry collector integration with Prometheus metrics and Grafana dashboards for production pod monitoring.
+6. **Managed Cloud Kubernetes**: Support for remote cloud providers (AWS EKS, GCP GKE, Azure AKS) with private container registry pushing (GHCR / ECR).
+7. **Production Deployment Strategies**: Advanced blue-green deployments, canary releases, automated metric-driven rollbacks, and human approval gates.
+8. **AI DevOps Incident Assistant**: Diagnostic assistant for live cluster incident triage, log root-cause analysis, and human-in-the-loop remediation workflows.

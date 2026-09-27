@@ -10,7 +10,7 @@ def test_root_route_returns_service_info():
     response = client.get("/")
     assert response.status_code == 200
     body = response.json()
-    assert body["service"] == "deploymind"
+    assert body["service"] == "codedeck"
     assert body["docs"] == "/docs"
     assert body["health"] == "/health"
 

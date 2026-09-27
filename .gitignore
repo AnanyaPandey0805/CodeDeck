@@ -25,3 +25,5 @@ tmp/
 k8s/generated/*
 !k8s/generated/.gitkeep
 generated_tests/
+
+docs/

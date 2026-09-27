@@ -13,12 +13,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
-logger = logging.getLogger("deploymind")
+logger = logging.getLogger("codedeck")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    logger.info("Starting DeployMind")
+    logger.info("Starting CodeDeck")
     init_db()
     logger.info("Database ready")
     try:
@@ -30,7 +30,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="CodeDeck", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="CodeDeck", version="1.0.0", lifespan=lifespan)
 
 origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 if not origins:
@@ -54,7 +54,7 @@ app.include_router(system.router)
 def root():
     return JSONResponse(
         {
-            "service": "deploymind",
+            "service": "codedeck",
             "status": "ok",
             "docs": "/docs",
             "health": "/health",
@@ -69,4 +69,4 @@ def favicon():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "deploymind"}
+    return {"status": "ok", "service": "codedeck"}

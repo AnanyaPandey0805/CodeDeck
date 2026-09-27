@@ -1,33 +1,44 @@
-# CodeDeck – AI‑Assisted Software Development & DevOps Platform
+# CodeDeck Documentation
 
-## Overview
-CodeDeck is a lightweight, AI‑augmented platform that automates the end‑to‑end software delivery workflow:
+Welcome to the technical documentation for **CodeDeck**, an AI-assisted software delivery and DevOps platform.
 
-1. **Repository analysis** – the backend clones a GitHub repo, runs static analysis and extracts a high‑level description.
-2. **AI‑driven Q&A** – developers can ask natural‑language questions about the codebase.
-3. **AI‑generated tests** – the system generates a pytest suite that is executed automatically.
-4. **Docker build** – a container image is built from the repository.
-5. **Kind/Kubernetes deployment** – the image is loaded into a local Kind cluster, deployed and a smoke‑test validates the service.
+---
 
-The UI (React) presents a clean dashboard showing the pipeline status and lets the user trigger each step manually.
+## Documentation Index
 
-## Quick start (local demo)
-```bash
-# prerequisites
-# - Docker Desktop (Windows) running
-# - Python 3.11, Node.js, npm
+| Document | Description |
+| :--- | :--- |
+| [`ARCHITECTURE.md`](file:///d:/agent/docs/ARCHITECTURE.md) | High-level system architecture, component breakdown, LangGraph workflow, DB schemas, security model |
+| [`TECHNOLOGY_GUIDE.md`](file:///d:/agent/docs/TECHNOLOGY_GUIDE.md) | Comprehensive technology guide covering all 30+ stack components for developers |
+| [`AI_PIPELINE.md`](file:///d:/agent/docs/AI_PIPELINE.md) | Detailed breakdown of repository RAG, hash embeddings, Q&A, AI testing, and failure analysis |
+| [`DATA_FLOW.md`](file:///d:/agent/docs/DATA_FLOW.md) | Data movement diagrams, storage locations, LLM data boundaries, and secret handling |
+| [`KUBERNETES_GUIDE.md`](file:///d:/agent/docs/KUBERNETES_GUIDE.md) | Kubernetes concepts, local `kind` cluster integration, manifest generation, rollout, and smoke testing |
+| [`MONITORING.md`](file:///d:/agent/docs/MONITORING.md) | Deployment health monitoring story, comparing current state with future APM observability target |
+| [`INFRASTRUCTURE.md`](file:///d:/agent/docs/INFRASTRUCTURE.md) | Physical vs containerized topology, network routing, system requirements, and cloud migration path |
+| [`COURSE_ALIGNMENT.md`](file:///d:/agent/docs/COURSE_ALIGNMENT.md) | Comprehensive mapping of course concepts, implemented tools, evidence, and gaps |
+| [`FUTURE_ROADMAP.md`](file:///d:/agent/docs/FUTURE_ROADMAP.md) | Development roadmap, phase breakdown, and future target architecture diagram |
+| [`VIVA_GUIDE.md`](file:///d:/agent/docs/VIVA_GUIDE.md) | Technical defense guide with 80+ Q&A pairs covering all platform dimensions |
+| [`PRESENTATION_CONTENT.md`](file:///d:/agent/docs/PRESENTATION_CONTENT.md) | Structured 8-slide presentation content for technical walkthroughs |
+| [`PROJECT_EXPLANATION.md`](file:///d:/agent/docs/PROJECT_EXPLANATION.md) | Core platform purpose, end-to-end delivery pipeline, and architectural goals |
+| [`TROUBLESHOOTING.md`](file:///d:/agent/docs/TROUBLESHOOTING.md) | Practical fixes for common Docker, Kubernetes, database, and pipeline issues |
+| [`DEMO.md`](file:///d:/agent/docs/DEMO.md) | Operational workflow and step-by-step execution guide |
 
-# backend
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload &
+---
 
-# frontend
-cd ../frontend
-npm install
-npm run dev   # http://localhost:5173
-```
-Enter a public GitHub repository URL in the UI and follow the steps displayed.
+## Quick Start (Local Direct Execution)
 
-## License
-MIT.
+To run backend and frontend directly on your local machine:
+
+1. **Backend**:
+   ```bash
+   cd backend
+   pip install -r requirements.txt
+   uvicorn app.main:app --reload --port 8000
+   ```
+2. **Frontend**:
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+3. Open `http://localhost:5173` in your browser.

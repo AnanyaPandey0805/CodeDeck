@@ -1,37 +1,62 @@
-# DeployMind Demo
+# CodeDeck — Operational Workflow & Execution Guide
 
-This is a simple 5-10 minute course demo flow.
+This document outlines the step-by-step workflow for operating CodeDeck end-to-end using a sample repository.
 
-## Recommended Demo Repository
+---
 
-Use a small public FastAPI repository so the full flow stays quick and understandable.
+## Target Workflow Summary
 
-## Demo Steps
+```
+GitHub Repository
+       ↓
+Repository Analysis
+       ↓
+Repository Indexing / RAG
+       ↓
+AI Repository Q&A
+       ↓
+AI-Assisted Testing
+       ↓
+Deployment Recommendation
+       ↓
+Docker Build
+       ↓
+Kubernetes (kind)
+       ↓
+Smoke Test
+       ↓
+Deployment Result / Logs
+```
 
-1. Start DeployMind with `docker compose up --build`.
-2. Open the frontend dashboard.
-3. Paste a GitHub repository URL and run analysis.
-4. Show detected language, framework, entrypoint, port, and package manager.
-5. Show the deployment recommendation.
-6. Open the Repository Q&A panel and ask a question such as:
-   - What framework does this repository use?
-   - What is the deployment entrypoint?
-   - What database does this application use?
-7. Show the retrieved repository snippets used to answer.
-8. Show the retrieval evaluation summary.
-9. Run AI-generated tests and review the output.
-10. Show the generated Dockerfile and Kubernetes manifests.
-11. Deploy staging.
-12. Show rollout progress and smoke-test result.
-13. Deploy GREEN production.
-14. Show the approval state.
-15. Approve traffic switch to GREEN.
-16. If needed, demonstrate rollback to BLUE.
-17. If a deployment fails, show the failure-analysis panel.
+---
 
-## What To Emphasize During Viva
+## Step-by-Step Execution Guide
 
-- The deployment core is real Docker + Kubernetes automation, not mock output.
-- Repository Q&A is grounded in retrieved repository chunks.
-- Recommendation, testing, and failure analysis are explainable and intentionally lightweight.
-- The project demonstrates coordinated tooling rather than a single prompt wrapper.
+### 1. System Initialization
+1. Ensure your local `kind` cluster is running:
+   ```bash
+   kind create cluster --name deploymind
+   ```
+2. Start CodeDeck via Docker Compose:
+   ```bash
+   docker compose up --build
+   ```
+3. Open the dashboard at `http://localhost:3000`.
+
+### 2. Creating a Project & Ingestion
+1. Paste a public repository URL (e.g. `https://github.com/tiangolo/full-stack-fastapi-template`).
+2. Click **Analyze**. CodeDeck will clone the repository, run static detection (language, framework, dependencies, ports, entrypoints), build the RAG index, run existing tests, execute security checks, and generate Docker and Kubernetes manifests.
+
+### 3. Repository Q&A (RAG)
+1. Navigate to the **AI Assistant** tab.
+2. Ask questions such as *"Where is authentication implemented?"* or *"What API endpoints exist?"*.
+3. Inspect the returned answer along with grounded file evidence citations.
+
+### 4. AI-Assisted Testing
+1. Navigate to the **Testing** tab.
+2. Click **Run AI Tests**. CodeDeck will inspect detected routes, synthesize route-focused pytest code, execute the tests via pytest in a subprocess, and display stdout/stderr.
+
+### 5. Staging Deployment
+1. Click **Deploy Staging** in the top navigation bar or from the **Kubernetes** tab.
+2. Track rollout status: image build → `kind load` → `kubectl apply` → pod readiness check → HTTP smoke test.
+3. View smoke test output (endpoint URL, HTTP status, pass/fail status).

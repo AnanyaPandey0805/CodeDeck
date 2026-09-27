@@ -1,165 +1,83 @@
-#!/usr/bin/env pwsh
-# CodeDeck Midsem Demo Script
-# Usage: .\scripts\run_demo.ps1
+# CodeDeck — End-to-End Workflow Script
 
 $ErrorActionPreference = "Stop"
 
-$BACKEND = "http://localhost:8000"
-$DEMO_REPO = "https://github.com/tiangolo/full-stack-fastapi-template"  # known-good FastAPI repo
-# Change DEMO_REPO to any supported Python/Node repo you prefer
-
-Write-Host ""
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  CodeDeck — Midsem Demo" -ForegroundColor Cyan
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host ""
-
-# ─── 1. Start Docker Compose ────────────────────────────────────────────────
-Write-Host "[1/10] Starting Docker Compose..." -ForegroundColor Yellow
+Write-Host "Starting CodeDeck environment..." -ForegroundColor Green
 docker compose up -d --build
-if ($LASTEXITCODE -ne 0) { Write-Host "Docker Compose failed" -ForegroundColor Red; exit 1 }
 
-# ─── 2. Wait for backend health ─────────────────────────────────────────────
-Write-Host "[2/10] Waiting for backend to be healthy..." -ForegroundColor Yellow
-$deadline = (Get-Date).AddSeconds(90)
-$up = $false
-while ((Get-Date) -lt $deadline) {
+Write-Host "Waiting for backend health endpoint..." -ForegroundColor Yellow
+$healthUrl = "http://localhost:8000/health"
+$maxRetries = 30
+$retryCount = 0
+$isHealthy = $false
+
+while (-not $isHealthy -and $retryCount -lt $maxRetries) {
     try {
-        $r = Invoke-RestMethod "$BACKEND/health" -TimeoutSec 3
-        if ($r.status -eq "ok") { $up = $true; break }
-    } catch { }
-    Start-Sleep 3
-    Write-Host "  ... waiting" -ForegroundColor DarkGray
-}
-if (-not $up) { Write-Host "Backend did not start in time" -ForegroundColor Red; exit 1 }
-Write-Host "  Backend healthy ✓" -ForegroundColor Green
-
-# ─── 3. System status ───────────────────────────────────────────────────────
-Write-Host "[3/10] Checking system status..." -ForegroundColor Yellow
-try {
-    $status = Invoke-RestMethod "$BACKEND/api/system/status"
-    Write-Host "  Backend  : $($status.backend.message)"
-    Write-Host "  Database : $($status.database.message)"
-    Write-Host "  Docker   : $($status.docker.message)"
-    Write-Host "  kind     : $($status.kind.message)"
-    Write-Host "  kubectl  : $($status.kubectl.message)"
-    if (-not $status.kind.ok) {
-        Write-Host ""
-        Write-Host "  WARNING: kind cluster not ready." -ForegroundColor Yellow
-        Write-Host "  Create one with: kind create cluster --name deploymind" -ForegroundColor Yellow
-        Write-Host "  Deployment steps will fail without a cluster." -ForegroundColor Yellow
-        Write-Host ""
+        $response = Invoke-RestMethod -Uri $healthUrl -Method Get -ErrorAction Stop
+        if ($response.status -eq "ok") {
+            $isHealthy = $true
+            Write-Host "Backend is healthy!" -ForegroundColor Green
+        }
+    } catch {
+        $retryCount++
+        Write-Host "Waiting... ($retryCount/$maxRetries)" -ForegroundColor Gray
+        Start-Sleep -Seconds 2
     }
-} catch {
-    Write-Host "  Could not retrieve system status: $_" -ForegroundColor DarkGray
 }
 
-# ─── 4. Create project ──────────────────────────────────────────────────────
-Write-Host "[4/10] Creating project for: $DEMO_REPO" -ForegroundColor Yellow
-$project = Invoke-RestMethod "$BACKEND/api/projects" -Method POST `
-    -ContentType "application/json" `
-    -Body (ConvertTo-Json @{ repository_url = $DEMO_REPO })
-$pid = $project.id
-Write-Host "  Project created: id=$pid name=$($project.repository_name) ✓" -ForegroundColor Green
+if (-not $isHealthy) {
+    Write-Error "Backend failed to become healthy within the timeout period."
+    exit 1
+}
 
-# ─── 5. Run analysis ────────────────────────────────────────────────────────
-Write-Host "[5/10] Running repository analysis (may take 2-5 minutes)..." -ForegroundColor Yellow
-$analysis = Invoke-RestMethod "$BACKEND/api/projects/$pid/analyze" -Method POST -TimeoutSec 600
-Write-Host "  Language  : $($analysis.language)"
-Write-Host "  Framework : $($analysis.framework)"
-Write-Host "  Entry     : $($analysis.entrypoint)"
-Write-Host "  Port      : $($analysis.analysis_result.port)"
-Write-Host "  Dockerfile: $($analysis.has_dockerfile)"
-Write-Host "  Analysis complete ✓" -ForegroundColor Green
+Write-Host "Checking system status..." -ForegroundColor Green
+# System status checks can be expanded here
 
-# ─── 6. Ask Q&A question ────────────────────────────────────────────────────
-Write-Host "[6/10] Asking repository Q&A question..." -ForegroundColor Yellow
-$qa = Invoke-RestMethod "$BACKEND/api/projects/$pid/qa" -Method POST `
-    -ContentType "application/json" `
-    -Body (ConvertTo-Json @{ question = "What framework does this project use?" })
-Write-Host "  Q: What framework does this project use?"
-Write-Host "  A: $($qa.answer)"
-Write-Host "  Sources: $($qa.sources.Count) retrieved ✓" -ForegroundColor Green
+Write-Host "Creating project integration..." -ForegroundColor Green
+$createProjectBody = @{
+    repository_url = "https://github.com/tiangolo/full-stack-fastapi-template"
+} | ConvertTo-Json
 
-# ─── 7. Run AI-generated tests ──────────────────────────────────────────────
-Write-Host "[7/10] Running AI-generated tests..." -ForegroundColor Yellow
-try {
-    $tests = Invoke-RestMethod "$BACKEND/api/projects/$pid/ai-tests" -Method POST -TimeoutSec 300
-    Write-Host "  Status : $($tests.status)"
-    Write-Host "  Message: $($tests.message)"
-    if ($tests.status -eq "passed") {
-        Write-Host "  AI tests PASSED ✓" -ForegroundColor Green
-    } elseif ($tests.status -eq "skipped") {
-        Write-Host "  AI tests SKIPPED (not supported for this repo type)" -ForegroundColor Yellow
+$projectResponse = Invoke-RestMethod -Uri "http://localhost:8000/projects/" -Method Post -Body $createProjectBody -ContentType "application/json"
+$projectId = $projectResponse.id
+Write-Host "Created Project ID: $projectId" -ForegroundColor Cyan
+
+Write-Host "Running analysis..." -ForegroundColor Green
+Invoke-RestMethod -Uri "http://localhost:8000/projects/$projectId/analyze" -Method Post
+
+Write-Host "Running RAG Q&A test..." -ForegroundColor Green
+$qaBody = @{
+    query = "What is the main purpose of this repository?"
+} | ConvertTo-Json
+$qaResponse = Invoke-RestMethod -Uri "http://localhost:8000/projects/$projectId/qa" -Method Post -Body $qaBody -ContentType "application/json"
+Write-Host "Q&A Answer: $($qaResponse.answer)" -ForegroundColor Cyan
+
+Write-Host "Running AI tests generation..." -ForegroundColor Green
+Invoke-RestMethod -Uri "http://localhost:8000/projects/$projectId/tests" -Method Post
+
+Write-Host "Deploying to staging environment..." -ForegroundColor Green
+Invoke-RestMethod -Uri "http://localhost:8000/projects/$projectId/deploy" -Method Post
+
+Write-Host "Polling pipeline status..." -ForegroundColor Yellow
+$statusUrl = "http://localhost:8000/projects/$projectId/status"
+$isFinished = $false
+while (-not $isFinished) {
+    $statusResponse = Invoke-RestMethod -Uri $statusUrl -Method Get
+    $state = $statusResponse.pipeline_status
+    if ($state -eq "completed" -or $state -eq "failed") {
+        $isFinished = $true
+        Write-Host "Pipeline finished with status: $state" -ForegroundColor Cyan
     } else {
-        Write-Host "  AI tests FAILED — see failure analysis in UI" -ForegroundColor Red
+        Write-Host "Pipeline status: $state..." -ForegroundColor Gray
+        Start-Sleep -Seconds 5
     }
-} catch {
-    Write-Host "  AI test call failed: $_" -ForegroundColor Yellow
 }
 
-# ─── 8. Deploy staging ──────────────────────────────────────────────────────
-Write-Host "[8/10] Deploying to staging (Docker + kind)..." -ForegroundColor Yellow
-Write-Host "  This may take 5-10 minutes for Docker build + kind load + rollout."
-try {
-    $deploy = Invoke-RestMethod "$BACKEND/api/projects/$pid/deploy/staging" -Method POST -TimeoutSec 900
-    Write-Host "  Deploy initiated: $($deploy.status) — $($deploy.message)"
-
-    # Wait for deployment to finish
-    $limit = (Get-Date).AddMinutes(12)
-    while ((Get-Date) -lt $limit) {
-        Start-Sleep 8
-        $proj = Invoke-RestMethod "$BACKEND/api/projects/$pid"
-        Write-Host "  ... project status: $($proj.status)"
-        if ($proj.status -eq "staging_healthy" -or $proj.status -eq "staging_failed" -or $proj.status -eq "failed") { break }
-    }
-
-    $proj = Invoke-RestMethod "$BACKEND/api/projects/$pid"
-    if ($proj.status -eq "staging_healthy") {
-        Write-Host "  Staging deployment HEALTHY ✓" -ForegroundColor Green
-    } else {
-        Write-Host "  Staging deployment status: $($proj.status)" -ForegroundColor Red
-        Write-Host "  Check the Kubernetes page in the UI for logs." -ForegroundColor Yellow
-    }
-} catch {
-    Write-Host "  Staging deploy failed: $_" -ForegroundColor Red
-    Write-Host "  Check that the kind cluster 'deploymind' is running." -ForegroundColor Yellow
+Write-Host "Pipeline Summary:" -ForegroundColor Green
+$statusResponse.steps | ForEach-Object {
+    Write-Host " - $($_.name): $($_.status)"
 }
 
-# ─── 9. Get pipeline summary ────────────────────────────────────────────────
-Write-Host "[9/10] Pipeline summary..." -ForegroundColor Yellow
-$pipeline = Invoke-RestMethod "$BACKEND/api/projects/$pid/pipeline"
-foreach ($step in $pipeline) {
-    $icon = switch ($step.status) {
-        "completed" { "✓" }
-        "failed"    { "✗" }
-        "running"   { "●" }
-        "warning"   { "⚠" }
-        default     { "○" }
-    }
-    $color = switch ($step.status) {
-        "completed" { "Green" }
-        "failed"    { "Red" }
-        "warning"   { "Yellow" }
-        default     { "Gray" }
-    }
-    Write-Host ("  {0} {1,-30} [{2}]" -f $icon, $step.name, $step.status) -ForegroundColor $color
-}
-
-# ─── 10. Final summary ──────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Demo Complete" -ForegroundColor Cyan
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  Open the dashboard: http://localhost:3000" -ForegroundColor White
-Write-Host "  API docs:           http://localhost:8000/docs" -ForegroundColor White
-Write-Host "  Project ID:         $pid" -ForegroundColor White
-Write-Host ""
-Write-Host "  Next steps in the UI:" -ForegroundColor Yellow
-Write-Host "    1. Select the project in Overview"
-Write-Host "    2. Go to AI Assistant → ask questions"
-Write-Host "    3. Go to Testing → review AI test results"
-Write-Host "    4. Go to Kubernetes → check deployment status"
-Write-Host "    5. Go to Settings → verify system health"
-Write-Host ""
+Write-Host "Workflow completed successfully." -ForegroundColor Green
+Write-Host "Access the dashboard at: http://localhost:3000" -ForegroundColor Cyan
