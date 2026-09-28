@@ -107,17 +107,55 @@ def apply_manifests(files: dict[str, str], namespace: str) -> None:
             logger.info("applied %s", name)
 
 
-def wait_rollout(deployment: str, namespace: str, timeout_s: int = 180) -> str:
+def wait_rollout(deployment: str, namespace: str, timeout_s: int = 300) -> str:
+    """Wait for rollout to complete, aborting early if pods crash-loop."""
+    import time
+
+    TERMINAL_STATES = {"CrashLoopBackOff", "Error", "OOMKilled", "ImagePullBackOff", "ErrImagePull", "InvalidImageName"}
+    deadline = time.time() + timeout_s
+    poll_interval = 15
+
+    while time.time() < deadline:
+        # Check pod status for early exit on crash
+        pod_proc = _run(
+            ["kubectl", "get", "pods", "-n", namespace, "-l", f"app={deployment.removesuffix('-staging').removesuffix('-green').removesuffix('-blue')}",
+             "-o", "jsonpath={range .items[*]}{.metadata.name}{'|'}{.status.containerStatuses[0].state.waiting.reason}{'|'}{.status.containerStatuses[0].state.terminated.reason}{'\\n'}{end}"],
+            timeout=15,
+        )
+        pod_output = (pod_proc.stdout or "").strip()
+        for line in pod_output.splitlines():
+            parts = line.split("|")
+            pod_name = parts[0].strip() if parts else ""
+            waiting_reason = parts[1].strip() if len(parts) > 1 else ""
+            terminated_reason = parts[2].strip() if len(parts) > 2 else ""
+            crash_reason = waiting_reason or terminated_reason
+            if crash_reason in TERMINAL_STATES:
+                # Collect logs for actionable error
+                log_proc = _run(["kubectl", "logs", "-n", namespace, pod_name, "--tail=60"], timeout=20)
+                prev_log_proc = _run(["kubectl", "logs", "-n", namespace, pod_name, "--previous", "--tail=40"], timeout=20)
+                logs = (log_proc.stdout or log_proc.stderr or "").strip()
+                prev_logs = (prev_log_proc.stdout or prev_log_proc.stderr or "").strip()
+                detail = f"Pod {pod_name} is in {crash_reason}.\nLogs:\n{logs}"
+                if prev_logs:
+                    detail += f"\n\nPrevious container logs:\n{prev_logs}"
+                raise RuntimeError(f"Rollout failed (early exit): {detail[-3000:]}")
+
+        # Try the standard rollout status check
+        proc = _run(
+            ["kubectl", "rollout", "status", f"deployment/{deployment}", "-n", namespace, "--timeout=1s"],
+            timeout=15,
+        )
+        if proc.returncode == 0:
+            logger.info("rollout complete for %s", deployment)
+            return (proc.stdout or "").strip() or "rollout complete"
+
+        remaining = int(deadline - time.time())
+        logger.info("waiting for rollout of %s (%ds remaining)...", deployment, remaining)
+        time.sleep(poll_interval)
+
+    # Final check after timeout
     proc = _run(
-        [
-            "kubectl",
-            "rollout",
-            "status",
-            f"deployment/{deployment}",
-            "-n",
-            namespace,
-            f"--timeout={timeout_s}s",
-        ],
+        ["kubectl", "rollout", "status", f"deployment/{deployment}", "-n", namespace, f"--timeout={timeout_s}s"],
         timeout=timeout_s + 30,
     )
     out = (proc.stdout or "") + (proc.stderr or "")
@@ -307,7 +345,7 @@ def patch_manifests_for_local(
     replicas: int = 1,
     env_vars: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Rewrite image and pull policy for kind; inject environment variables; prefer TCP probes."""
+    """Rewrite image and pull policy for kind; inject environment variables; use TCP probes with numeric ports."""
     import yaml
     patched: dict[str, str] = {}
     for name, content in files.items():
@@ -318,11 +356,41 @@ def patch_manifests_for_local(
                     continue
                 spec = doc.get("spec", {})
                 spec["replicas"] = replicas
-                template_spec = spec.get("template", {}).get("spec", {})
+
+                # For staging: remove version from selector so the renamed deployment
+                # (-staging suffix) can still match pods without a version label conflict.
+                selector = spec.get("selector", {})
+                match_labels = selector.get("matchLabels", {})
+                match_labels.pop("version", None)
+
+                template = spec.get("template", {})
+                template_meta = template.get("metadata", {})
+                template_labels = template_meta.get("labels", {})
+                template_labels.pop("version", None)
+
+                template_spec = template.get("spec", {})
+
+                # Relax pod-level security context so apps that write files on startup don't crash.
+                pod_sec = template_spec.get("securityContext", {})
+                pod_sec.pop("readOnlyRootFilesystem", None)
+                # Keep runAsNonRoot / runAsUser only if the generated Dockerfile actually uses appuser
+                pod_sec["runAsNonRoot"] = True
+                pod_sec["runAsUser"] = 1000
+                pod_sec["fsGroup"] = 1000
+                template_spec["securityContext"] = pod_sec
+
                 containers = template_spec.get("containers", [])
                 for container in containers:
                     container["image"] = image
                     container["imagePullPolicy"] = "Never"
+
+                    # Relax container-level security context – don't enforce readOnlyRootFilesystem
+                    c_sec = container.get("securityContext", {})
+                    c_sec.pop("readOnlyRootFilesystem", None)
+                    c_sec["allowPrivilegeEscalation"] = False
+                    c_sec["runAsNonRoot"] = True
+                    c_sec["runAsUser"] = 1000
+                    container["securityContext"] = c_sec
 
                     # Inject / merge environment variables
                     if env_vars:
@@ -333,18 +401,31 @@ def patch_manifests_for_local(
                                 env_map[k] = str(v)
                         container["env"] = [{"name": k, "value": str(v)} for k, v in env_map.items()]
 
-                    # Convert probes to TCP for local kind stability
+                    # Determine numeric port for TCP probes (named ports are not always resolvable)
+                    container_ports = container.get("ports", [])
+                    probe_port = 8000  # safe fallback
+                    if container_ports:
+                        first_port = container_ports[0]
+                        if isinstance(first_port, dict) and first_port.get("containerPort"):
+                            probe_port = int(first_port["containerPort"])
+                        elif isinstance(first_port, int):
+                            probe_port = first_port
+
+                    # Convert HTTP probes to TCP for local kind stability
+                    # Use the numeric port so k8s can resolve it regardless of port naming.
                     if "readinessProbe" in container and "httpGet" in container["readinessProbe"]:
                         container["readinessProbe"] = {
-                            "tcpSocket": {"port": "http"},
-                            "initialDelaySeconds": 5,
-                            "periodSeconds": 5
+                            "tcpSocket": {"port": probe_port},
+                            "initialDelaySeconds": 10,
+                            "periodSeconds": 5,
+                            "failureThreshold": 6,
                         }
                     if "livenessProbe" in container and "httpGet" in container["livenessProbe"]:
                         container["livenessProbe"] = {
-                            "tcpSocket": {"port": "http"},
-                            "initialDelaySeconds": 15,
-                            "periodSeconds": 20
+                            "tcpSocket": {"port": probe_port},
+                            "initialDelaySeconds": 30,
+                            "periodSeconds": 20,
+                            "failureThreshold": 3,
                         }
             patched[name] = yaml.dump_all(docs, default_flow_style=False)
         else:

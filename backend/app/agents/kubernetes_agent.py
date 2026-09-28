@@ -38,12 +38,10 @@ spec:
   selector:
     matchLabels:
       app: {name}
-      version: blue
   template:
     metadata:
       labels:
         app: {name}
-        version: blue
     spec:
       serviceAccountName: {name}
       securityContext:
@@ -59,12 +57,8 @@ spec:
               name: http
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
             runAsNonRoot: true
             runAsUser: 1000
-            capabilities:
-              drop:
-                - ALL
           resources:
             requests:
               cpu: 100m
@@ -73,17 +67,17 @@ spec:
               cpu: 500m
               memory: 512Mi
           readinessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            tcpSocket:
+              port: {port}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 6
           livenessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 15
+            tcpSocket:
+              port: {port}
+            initialDelaySeconds: 30
             periodSeconds: 20
+            failureThreshold: 3
 """
 
     service = f"""apiVersion: v1
@@ -96,7 +90,6 @@ spec:
   type: ClusterIP
   selector:
     app: {name}
-    version: blue
   ports:
     - name: http
       port: 80

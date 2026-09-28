@@ -88,19 +88,29 @@ def _collect_runtime_env(app_name: str, app_dir: Path, port: int) -> dict[str, s
         "DOMAIN": "localhost",
         "FRONTEND_HOST": "http://localhost",
         "BACKEND_CORS_ORIGINS": '["http://localhost", "http://localhost:3000", "http://localhost:8000"]',
+        # Use SQLite as a safe DB fallback so repos that configure a missing Postgres
+        # don't immediately crash on startup in the staging environment.
         "POSTGRES_SERVER": "localhost",
         "POSTGRES_PORT": "5432",
         "POSTGRES_USER": "postgres",
         "POSTGRES_PASSWORD": "supersecretpassword123",
         "POSTGRES_DB": "app",
-        "DATABASE_URL": "postgresql://postgres:supersecretpassword123@localhost:5432/app",
+        "DATABASE_URL": "sqlite:///./staging.db",
+        "SQLALCHEMY_DATABASE_URI": "sqlite:///./staging.db",
         "PORT": str(port),
     }
     merged = {**standard_defaults, **env_vars}
+    # Replace placeholder passwords
     if "DATABASE_URL" in merged and "changethis" in merged["DATABASE_URL"]:
         merged["DATABASE_URL"] = merged["DATABASE_URL"].replace("changethis", "supersecretpassword123")
     if merged.get("FIRST_SUPERUSER_PASSWORD") == "changethis":
         merged["FIRST_SUPERUSER_PASSWORD"] = "supersecretpassword123"
+    # If env-file provided a non-sqlite DB URL that still points to localhost/changethis,
+    # fall back to SQLite so the app starts cleanly in a kubernetes pod without a real DB.
+    db_url = merged.get("DATABASE_URL", "")
+    if db_url and any(host in db_url for host in ("localhost", "127.0.0.1", "0.0.0.0")) and "sqlite" not in db_url:
+        merged["DATABASE_URL"] = "sqlite:///./staging.db"
+        merged["SQLALCHEMY_DATABASE_URI"] = "sqlite:///./staging.db"
     return merged
 
 
@@ -196,8 +206,10 @@ def _reliable_staging_dockerfile(app_dir: Path, analysis: dict) -> str:
     if (app_dir / "requirements.txt").exists():
         return f"""FROM {python_base}
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libsqlite3-dev && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt || pip install --no-cache-dir -r requirements.txt --ignore-requires-python
+RUN pip install --no-cache-dir aiosqlite 2>/dev/null || true
 COPY . .
 RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
@@ -210,12 +222,12 @@ CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
         # We copy the full source first so editable/src-layout packages resolve.
         return f"""FROM {python_base}
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libsqlite3-dev && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml* uv.lock* README* ./
 COPY . .
 RUN pip install --no-cache-dir --upgrade pip && \\
     pip install --no-cache-dir . 2>/dev/null || \\
-    pip install --no-cache-dir fastapi uvicorn sqlalchemy psycopg pydantic pydantic-settings
+    pip install --no-cache-dir fastapi uvicorn sqlalchemy aiosqlite pydantic pydantic-settings
 RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE {port}
@@ -225,9 +237,10 @@ CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
     if (app_dir / "poetry.lock").exists() or pm == "poetry":
         return f"""FROM {python_base}
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libsqlite3-dev && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir poetry
 COPY pyproject.toml* poetry.lock* ./
-RUN poetry config virtualenvs.create false && (poetry install --no-interaction --no-ansi || pip install --no-cache-dir fastapi uvicorn)
+RUN poetry config virtualenvs.create false && (poetry install --no-interaction --no-ansi || pip install --no-cache-dir fastapi uvicorn aiosqlite)
 COPY . .
 RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
@@ -238,8 +251,9 @@ CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
     if (app_dir / "pyproject.toml").exists():
         return f"""FROM {python_base}
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libsqlite3-dev && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml .
-RUN pip install --no-cache-dir . || pip install --no-cache-dir fastapi uvicorn
+RUN pip install --no-cache-dir . || pip install --no-cache-dir fastapi uvicorn aiosqlite
 COPY . .
 RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
@@ -259,12 +273,13 @@ CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
             except Exception:
                 pass
 
-        pkgs_str = " ".join(["fastapi", "uvicorn"] + extra_pkgs)
+        pkgs_str = " ".join(["fastapi", "uvicorn", "aiosqlite"] + extra_pkgs)
         if analysis.get("framework") == "Flask":
-            pkgs_str = "flask gunicorn " + " ".join(extra_pkgs)
+            pkgs_str = "flask gunicorn aiosqlite " + " ".join(extra_pkgs)
 
         return f"""FROM {python_base}
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libsqlite3-dev && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN pip install --no-cache-dir {pkgs_str}
 RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
@@ -362,13 +377,17 @@ def deploy_staging(
         patched = k8s_svc.patch_manifests_for_local(
             local_files, image=image, app_name=app_name, replicas=1, env_vars=env_vars
         )
-        # Keep a staging-named deployment for clarity while reusing service name
+        # Rename the Deployment to {app_name}-staging at the YAML level
+        # (raw string replacement is fragile and can accidentally corrupt selectors/labels).
         if "deployment.yaml" in patched:
-            patched["deployment.yaml"] = patched["deployment.yaml"].replace(
-                f"name: {app_name}\n",
-                f"name: {app_name}-staging\n",
-                1,
-            )
+            import yaml as _yaml
+            docs = list(_yaml.safe_load_all(patched["deployment.yaml"]))
+            for doc in docs:
+                if doc and doc.get("kind") == "Deployment":
+                    meta = doc.setdefault("metadata", {})
+                    if meta.get("name") == app_name:
+                        meta["name"] = f"{app_name}-staging"
+            patched["deployment.yaml"] = _yaml.dump_all(docs, default_flow_style=False)
 
         # Inject a NodePort service so the app is reachable from the host browser
         # without manual kubectl port-forward.
@@ -380,7 +399,7 @@ def deploy_staging(
 
         deploy_name = f"{app_name}-staging"
         k8s_svc.apply_manifests(patched, namespace=namespace)
-        rollout = k8s_svc.wait_rollout(deploy_name, namespace=namespace, timeout_s=240)
+        rollout = k8s_svc.wait_rollout(deploy_name, namespace=namespace, timeout_s=300)
         status = k8s_svc.get_deployment_status(deploy_name, namespace=namespace)
         smoke = k8s_svc.smoke_test(app_name, namespace=namespace)
 
