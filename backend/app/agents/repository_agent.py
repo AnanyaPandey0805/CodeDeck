@@ -19,16 +19,8 @@ K8S_NAMES = {
 
 def _find_fastapi_entrypoint(root: Path) -> str:
     """Find the exact FastAPI application entrypoint (module:attr)."""
-    # 1. Search for uvicorn.run("...", ...) in startup scripts
-    for fname in ("main.py", "app.py", "run.py", "server.py", "wsgi.py", "asgi.py"):
-        fpath = root / fname
-        if fpath.exists():
-            text = _read_text(fpath)
-            m = re.search(r'uvicorn\.run\(\s*["\']([^"\']+)["\']', text)
-            if m:
-                return m.group(1).strip()
-
-    # 2. Search for variable = FastAPI(...) in common and discovered Python files
+    # Search common locations first, then source trees. Repositories commonly
+    # keep the launcher in main.py but the FastAPI object in app/api.py or src/.
     candidates: list[Path] = [
         root / "app" / "main.py",
         root / "app" / "api.py",
@@ -40,15 +32,21 @@ def _find_fastapi_entrypoint(root: Path) -> str:
         root / "app.py",
         root / "api.py",
     ]
+    ignored_dirs = {".git", ".venv", "venv", "env", "node_modules", "tests", "test"}
     for folder in (root, root / "app", root / "src", root / "api"):
         if folder.is_dir():
-            for f in folder.glob("*.py"):
+            for f in folder.rglob("*.py"):
+                if any(part.lower() in ignored_dirs for part in f.relative_to(root).parts):
+                    continue
                 if f not in candidates and f.is_file():
                     candidates.append(f)
 
+    uvicorn_entries: list[str] = []
     for fpath in candidates:
         if fpath.is_file():
             text = _read_text(fpath)
+            for match in re.finditer(r'uvicorn\.run\(\s*["\']([^"\']+)["\']', text):
+                uvicorn_entries.append(match.group(1).strip())
             m = re.search(r'(?m)^([a-zA-Z0-9_]+)\s*=\s*(?:[a-zA-Z0-9_]+\.)?FastAPI\(', text)
             if m:
                 var_name = m.group(1)
@@ -59,7 +57,13 @@ def _find_fastapi_entrypoint(root: Path) -> str:
                 except ValueError:
                     pass
 
-    # 3. Fallbacks
+    # A literal uvicorn target is useful for factory-style apps where the
+    # FastAPI assignment is not directly visible. Prefer it only after direct
+    # FastAPI instances so a stale launcher cannot mask the real application.
+    if uvicorn_entries:
+        return uvicorn_entries[0]
+
+    # Fallbacks
     if (root / "app" / "main.py").exists():
         return "app.main:app"
     if (root / "main.py").exists():

@@ -1,4 +1,8 @@
-from app.agents.deployment_agent import _adjust_python_base_image
+from app.agents.deployment_agent import (
+    _adjust_python_base_image,
+    _align_fastapi_dockerfile_entrypoint,
+    _refresh_fastapi_entrypoint,
+)
 from app.agents.docker_agent import generate_dockerfile
 from app.agents.kubernetes_agent import generate_kubernetes, sanitize_name
 from app.agents.validate import validate_configuration, validate_dockerfile
@@ -54,6 +58,19 @@ def test_adjust_python_base_image_rewrites_old_generated_dockerfile(tmp_path):
     dockerfile = "FROM python:3.11-slim\nWORKDIR /app\n"
     adjusted = _adjust_python_base_image(dockerfile, tmp_path)
     assert adjusted.startswith("FROM python:3.10-slim")
+
+
+def test_staging_aligns_existing_fastapi_dockerfile_with_detected_entrypoint(tmp_path):
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "api.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
+    dockerfile = 'FROM python:3.11-slim\nCMD ["uvicorn", "main:app", "--host", "0.0.0.0"]\n'
+
+    analysis = _refresh_fastapi_entrypoint(tmp_path, {"framework": "FastAPI", "entrypoint": "main:app"})
+    updated = _align_fastapi_dockerfile_entrypoint(dockerfile, analysis["entrypoint"])
+
+    assert analysis["entrypoint"] == "app.api:app"
+    assert '"app.api:app"' in updated
+    assert '"main:app"' not in updated
 
 
 def test_keeps_existing_dockerfile(tmp_path):

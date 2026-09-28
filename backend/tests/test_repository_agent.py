@@ -92,6 +92,19 @@ def test_fastapi_uvicorn_run_in_main(tmp_path: Path):
     assert result.entrypoint == "app.api:app"
 
 
+def test_fastapi_detection_finds_nested_application_not_launcher(tmp_path: Path):
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("import uvicorn\n", encoding="utf-8")
+    api_dir = tmp_path / "src" / "service"
+    api_dir.mkdir(parents=True)
+    (api_dir / "api.py").write_text("from fastapi import FastAPI\napi = FastAPI()\n", encoding="utf-8")
+
+    result = analyze_repository(tmp_path)
+
+    assert result.framework == "FastAPI"
+    assert result.entrypoint == "src.service.api:api"
+
+
 def test_build_context_determination(tmp_path: Path):
     from app.agents.deployment_agent import _determine_build_context
 

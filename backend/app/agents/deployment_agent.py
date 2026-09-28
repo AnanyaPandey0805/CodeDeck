@@ -1,4 +1,5 @@
 import logging
+import re
 import shutil
 from pathlib import Path
 
@@ -13,6 +14,53 @@ from app.services.docker import has_complex_dockerfile
 from app.services.github import cleanup_repository, clone_repository
 
 logger = logging.getLogger("deploymind")
+
+
+_UVICORN_ARRAY_ENTRYPOINT = re.compile(
+    r'((?:"|\')uvicorn(?:"|\')\s*,\s*(?:"|\'))([^"\']+:[^"\']+)((?:"|\'))',
+    re.IGNORECASE,
+)
+_UVICORN_SHELL_ENTRYPOINT = re.compile(
+    r'(\buvicorn\s+)([A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_]*)',
+    re.IGNORECASE,
+)
+
+
+def _refresh_fastapi_entrypoint(app_dir: Path, analysis: dict) -> dict:
+    """Refresh a FastAPI target from the deployment copy before building.
+
+    Analysis may have been saved before a repository changed, and a number of
+    full-stack projects keep main.py as a launcher rather than ASGI module.
+    """
+    refreshed = dict(analysis)
+    if (refreshed.get("framework") or "").lower() != "fastapi":
+        return refreshed
+
+    from app.agents.repository_agent import _find_fastapi_entrypoint
+
+    entrypoint = _find_fastapi_entrypoint(app_dir)
+    if entrypoint:
+        refreshed["entrypoint"] = entrypoint
+    return refreshed
+
+
+def _align_fastapi_dockerfile_entrypoint(dockerfile_content: str, entrypoint: str | None) -> str:
+    """Use the analyzed ASGI target when a Dockerfile starts uvicorn directly."""
+    if not entrypoint or ":" not in entrypoint:
+        return dockerfile_content
+
+    def replace_array(match: re.Match[str]) -> str:
+        return f"{match.group(1)}{entrypoint}{match.group(3)}"
+
+    def replace_shell(match: re.Match[str]) -> str:
+        return f"{match.group(1)}{entrypoint}"
+
+    updated = _UVICORN_ARRAY_ENTRYPOINT.sub(replace_array, dockerfile_content)
+    return _UVICORN_SHELL_ENTRYPOINT.sub(replace_shell, updated)
+
+
+def _needs_fastapi_entrypoint_alignment(dockerfile_content: str, entrypoint: str | None) -> bool:
+    return _align_fastapi_dockerfile_entrypoint(dockerfile_content, entrypoint) != dockerfile_content
 
 
 def _allocate_node_port(app_name: str, base: int = 30100, spread: int = 2600) -> int:
@@ -337,14 +385,25 @@ def deploy_staging(
         if not app_dir.is_dir():
             app_dir = dest
         sanitize_requirements_file(app_dir)
+        analysis = _refresh_fastapi_entrypoint(app_dir, analysis)
         existing_dockerfile = app_dir / "Dockerfile"
         # Bypass the repo's own Dockerfile if it uses BuildKit-only features
         # (e.g., RUN --mount, oven/bun, uv sync --frozen) that represent a
         # full CI/CD pipeline rather than a simple container build. We generate
         # a simpler, self-contained Dockerfile for the backend service only.
         if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile):
-            dockerfile_path = existing_dockerfile
-            context_dir = _determine_build_context(dest, app_dir, dockerfile_path, analysis.get("source_subdir"))
+            existing_content = existing_dockerfile.read_text(encoding="utf-8", errors="ignore")
+            if (analysis.get("framework") or "").lower() == "fastapi" and _needs_fastapi_entrypoint_alignment(
+                existing_content, analysis.get("entrypoint")
+            ):
+                staging_content = _align_fastapi_dockerfile_entrypoint(existing_content, analysis.get("entrypoint"))
+                context_dir, dockerfile_path = _write_build_context(
+                    dest, staging_content, analysis.get("source_subdir")
+                )
+                logger.info("Aligned FastAPI Dockerfile entrypoint with detected target %s", analysis.get("entrypoint"))
+            else:
+                dockerfile_path = existing_dockerfile
+                context_dir = _determine_build_context(dest, app_dir, dockerfile_path, analysis.get("source_subdir"))
         else:
             if existing_dockerfile.exists() and has_complex_dockerfile(existing_dockerfile):
                 logger.warning(
@@ -354,6 +413,10 @@ def deploy_staging(
             staging_content = dockerfile.strip()
             if not staging_content:
                 staging_content = _reliable_staging_dockerfile(app_dir, analysis)
+            if (analysis.get("framework") or "").lower() == "fastapi":
+                staging_content = _align_fastapi_dockerfile_entrypoint(
+                    staging_content, analysis.get("entrypoint")
+                )
             staging_content = _adjust_python_base_image(staging_content, app_dir)
             context_dir, dockerfile_path = _write_build_context(
                 dest,
@@ -465,12 +528,23 @@ def deploy_green(
         if not app_dir.is_dir():
             app_dir = dest
         sanitize_requirements_file(app_dir)
+        analysis = _refresh_fastapi_entrypoint(app_dir, analysis)
 
         existing_dockerfile = app_dir / "Dockerfile"
         # Bypass complex Dockerfiles (bun, uv --mount, etc.) same as staging
         if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile):
-            dockerfile_path = existing_dockerfile
-            context_dir = _determine_build_context(dest, app_dir, dockerfile_path, analysis.get("source_subdir"))
+            existing_content = existing_dockerfile.read_text(encoding="utf-8", errors="ignore")
+            if (analysis.get("framework") or "").lower() == "fastapi" and _needs_fastapi_entrypoint_alignment(
+                existing_content, analysis.get("entrypoint")
+            ):
+                staging_content = _align_fastapi_dockerfile_entrypoint(existing_content, analysis.get("entrypoint"))
+                context_dir, dockerfile_path = _write_build_context(
+                    dest, staging_content, analysis.get("source_subdir")
+                )
+                logger.info("Aligned FastAPI Dockerfile entrypoint with detected target %s", analysis.get("entrypoint"))
+            else:
+                dockerfile_path = existing_dockerfile
+                context_dir = _determine_build_context(dest, app_dir, dockerfile_path, analysis.get("source_subdir"))
         else:
             if existing_dockerfile.exists() and has_complex_dockerfile(existing_dockerfile):
                 logger.warning(
@@ -480,6 +554,10 @@ def deploy_green(
             staging_content = dockerfile.strip()
             if not staging_content:
                 staging_content = _reliable_staging_dockerfile(app_dir, analysis)
+            if (analysis.get("framework") or "").lower() == "fastapi":
+                staging_content = _align_fastapi_dockerfile_entrypoint(
+                    staging_content, analysis.get("entrypoint")
+                )
             staging_content = _adjust_python_base_image(staging_content, app_dir)
             context_dir, dockerfile_path = _write_build_context(
                 dest,
