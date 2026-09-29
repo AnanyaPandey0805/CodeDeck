@@ -71,6 +71,31 @@ def _find_fastapi_entrypoint(root: Path) -> str:
     return "app.main:app"
 
 
+def _find_python_entrypoint(root: Path, framework_name: str) -> str | None:
+    """Locate Flask/Django modules without assuming a fixed project layout."""
+    ignored_dirs = {".git", ".venv", "venv", "env", "node_modules", "tests", "test"}
+    for path in root.rglob("*.py"):
+        if any(part.lower() in ignored_dirs for part in path.relative_to(root).parts):
+            continue
+        text = _read_text(path)
+        if framework_name == "Django" and path.name == "wsgi.py":
+            return f"{'.'.join(path.relative_to(root).with_suffix('').parts)}:application"
+        if framework_name == "Flask":
+            match = re.search(r"(?m)^([a-zA-Z0-9_]+)\s*=\s*(?:[a-zA-Z0-9_]+\.)?Flask\(", text)
+            if match:
+                return f"{'.'.join(path.relative_to(root).with_suffix('').parts)}:{match.group(1)}"
+    return None
+
+
+def _detect_database(blob: str) -> str | None:
+    blob = blob.lower()
+    if any(marker in blob for marker in ("postgresql", "postgres", "psycopg", "asyncpg")):
+        return "postgresql"
+    if any(marker in blob for marker in ("mysql", "mariadb", "pymysql", "mysqlclient")):
+        return "mysql"
+    return None
+
+
 class RepositoryAnalysis(BaseModel):
     language: str
     framework: str | None = None
@@ -88,6 +113,7 @@ class RepositoryAnalysis(BaseModel):
     is_multiservice: bool = False
     detected_services: list[str] = Field(default_factory=list)
     multiservice_notice: str | None = None
+    database: str | None = None
 
 
 def _read_text(path: Path, limit: int = 200_000) -> str:
@@ -132,7 +158,7 @@ def _detect_python(root: Path, names: set[str]) -> RepositoryAnalysis | None:
 
     for candidate_dir in (root, root / "app", root / "src", root / "api"):
         if candidate_dir.is_dir():
-            for py_path in candidate_dir.glob("*.py"):
+            for py_path in candidate_dir.rglob("*.py"):
                 blob += _read_text(py_path).lower() + "\n"
 
     port = 8000
@@ -141,10 +167,10 @@ def _detect_python(root: Path, names: set[str]) -> RepositoryAnalysis | None:
         entrypoint = _find_fastapi_entrypoint(root)
     elif "django" in blob or "manage.py" in names:
         framework = "Django"
-        entrypoint = "manage.py"
+        entrypoint = _find_python_entrypoint(root, "Django")
     elif "flask" in blob:
         framework = "Flask"
-        entrypoint = "app:app" if (root / "app.py").exists() else ("app.main:app" if (root / "app" / "main.py").exists() else "wsgi:app")
+        entrypoint = _find_python_entrypoint(root, "Flask")
         port = 5000
     else:
         framework = "Python"
@@ -171,6 +197,7 @@ def _detect_python(root: Path, names: set[str]) -> RepositoryAnalysis | None:
         message=f"{framework} project detected ({pm})",
         port=port,
         top_level_files=sorted(names)[:40],
+        database=_detect_database(blob),
     )
 
 
@@ -203,6 +230,7 @@ def _detect_node(root: Path, names: set[str]) -> RepositoryAnalysis | None:
     if "react" in deps or "react-scripts" in deps or "vite" in deps:
         framework = "React"
         entrypoint = "npm run build"
+        port = 80
     if "express" in deps:
         framework = "Express" if framework == "Node.js" else f"{framework}+Express"
         for candidate in ("server.js", "index.js", "app.js", "src/index.js", "src/server.js"):
@@ -253,6 +281,11 @@ def _detect_java(root: Path, names: set[str]) -> RepositoryAnalysis | None:
     for fname in ("pom.xml", "build.gradle", "build.gradle.kts"):
         if (root / fname).exists():
             blob += _read_text(root / fname).lower()
+    for pattern in ("*.properties", "*.yml", "*.yaml", "*.java"):
+        for path in root.rglob(pattern):
+            if any(part in {".git", "target", "build", ".gradle"} for part in path.parts):
+                continue
+            blob += _read_text(path).lower() + "\n"
 
     framework = "Spring Boot" if "spring-boot" in blob or "springframework" in blob else "Java"
     if "pom.xml" in names:
@@ -274,6 +307,7 @@ def _detect_java(root: Path, names: set[str]) -> RepositoryAnalysis | None:
         message=f"{framework} project detected ({pm})",
         port=8080,
         top_level_files=sorted(names)[:40],
+        database=_detect_database(blob),
     )
 
 
@@ -300,7 +334,8 @@ def analyze_repository(repo_path: str | Path) -> RepositoryAnalysis:
     if is_multi:
         multiservice_notice = f"Multi-service repository detected ({', '.join(detected_services)}). DeployMind containerizes the primary backend service for Kubernetes deployment."
 
-    # Full-stack repos often have a root package.json plus a Python backend/
+    # Full-stack repos often have a root React package plus a backend/. Prefer
+    # supported backend runtimes over the UI service.
     for sub in ("backend", "server", "api"):
         sub_dir = root / sub
         if sub_dir.is_dir() and (
@@ -308,9 +343,12 @@ def analyze_repository(repo_path: str | Path) -> RepositoryAnalysis:
             or (sub_dir / "pyproject.toml").exists()
             or (sub_dir / "app").is_dir()
             or (sub_dir / "main.py").exists()
+            or (sub_dir / "pom.xml").exists()
+            or (sub_dir / "build.gradle").exists()
+            or (sub_dir / "build.gradle.kts").exists()
         ):
             nested = analyze_repository(sub_dir)
-            if nested.supported and nested.language == "Python":
+            if nested.supported and nested.language in {"Python", "Java"}:
                 nested.message = f"{nested.message} ({sub}/)"
                 nested.source_subdir = sub
                 nested.top_level_files = sorted(names)[:40]

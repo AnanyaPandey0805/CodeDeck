@@ -5,12 +5,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from app.agents.kubernetes_agent import sanitize_name
+from app.agents.kubernetes_agent import generate_database_manifest, sanitize_name
 from app.core.config import settings
 from app.services import docker as docker_svc
 from app.services import kubernetes as k8s_svc
 from app.services.dependency_sanitizer import choose_python_base_image, sanitize_requirements_file
-from app.services.docker import has_complex_dockerfile
+from app.services.docker import has_complex_dockerfile, requires_prebuilt_java_artifact
 from app.services.github import cleanup_repository, clone_repository
 
 logger = logging.getLogger("deploymind")
@@ -41,6 +41,22 @@ def _refresh_fastapi_entrypoint(app_dir: Path, analysis: dict) -> dict:
     entrypoint = _find_fastapi_entrypoint(app_dir)
     if entrypoint:
         refreshed["entrypoint"] = entrypoint
+    return refreshed
+
+
+def _refresh_runtime_analysis(app_dir: Path, analysis: dict) -> dict:
+    """Refresh mutable runtime signals from the deployment copy."""
+    refreshed = _refresh_fastapi_entrypoint(app_dir, analysis)
+    try:
+        from app.agents.repository_agent import analyze_repository
+
+        current = analyze_repository(app_dir)
+        if current.database:
+            refreshed["database"] = current.database
+        if current.framework in {"Flask", "Django"} and current.entrypoint:
+            refreshed["entrypoint"] = current.entrypoint
+    except Exception:
+        logger.warning("Could not refresh runtime analysis for %s", app_dir, exc_info=True)
     return refreshed
 
 
@@ -98,7 +114,7 @@ spec:
 """
 
 
-def _collect_runtime_env(app_name: str, app_dir: Path, port: int) -> dict[str, str]:
+def _collect_runtime_env(app_name: str, app_dir: Path, port: int, database: str | None = None) -> dict[str, str]:
     """Gather environment variables from .env files and provide standard defaults
     so apps requiring settings (like FastAPI templates) start cleanly."""
     env_vars: dict[str, str] = {}
@@ -148,6 +164,39 @@ def _collect_runtime_env(app_name: str, app_dir: Path, port: int) -> dict[str, s
         "PORT": str(port),
     }
     merged = {**standard_defaults, **env_vars}
+    # Staging owns an ephemeral in-cluster database. Override developer .env
+    # endpoints so the deployed pod never attempts to reach localhost or a
+    # private production database.
+    if database == "postgresql":
+        service = f"{app_name}-db"
+        url = f"postgresql://deploymind:deploymind@{service}:5432/app"
+        merged.update({
+            "DATABASE_URL": url,
+            "SQLALCHEMY_DATABASE_URI": url,
+            "POSTGRES_SERVER": service,
+            "POSTGRES_PORT": "5432",
+            "POSTGRES_USER": "deploymind",
+            "POSTGRES_PASSWORD": "deploymind",
+            "POSTGRES_DB": "app",
+            "SPRING_DATASOURCE_URL": f"jdbc:postgresql://{service}:5432/app",
+            "SPRING_DATASOURCE_USERNAME": "deploymind",
+            "SPRING_DATASOURCE_PASSWORD": "deploymind",
+        })
+    elif database == "mysql":
+        service = f"{app_name}-db"
+        url = f"mysql+pymysql://deploymind:deploymind@{service}:3306/app"
+        merged.update({
+            "DATABASE_URL": url,
+            "SQLALCHEMY_DATABASE_URI": url,
+            "MYSQL_HOST": service,
+            "MYSQL_PORT": "3306",
+            "MYSQL_DATABASE": "app",
+            "MYSQL_USER": "deploymind",
+            "MYSQL_PASSWORD": "deploymind",
+            "SPRING_DATASOURCE_URL": f"jdbc:mysql://{service}:3306/app?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true",
+            "SPRING_DATASOURCE_USERNAME": "deploymind",
+            "SPRING_DATASOURCE_PASSWORD": "deploymind",
+        })
     # Replace placeholder passwords
     if "DATABASE_URL" in merged and "changethis" in merged["DATABASE_URL"]:
         merged["DATABASE_URL"] = merged["DATABASE_URL"].replace("changethis", "supersecretpassword123")
@@ -238,12 +287,23 @@ def _write_build_context(
     return context_dir, dockerfile_path
 
 
+def _python_runtime_command(analysis: dict, entrypoint: str, port: int) -> str:
+    framework = (analysis.get("framework") or "").lower()
+    if framework == "flask":
+        return f'CMD ["gunicorn", "-b", "0.0.0.0:{port}", "{entrypoint or "app:app"}"]'
+    if framework == "django":
+        return f'CMD ["gunicorn", "-b", "0.0.0.0:{port}", "{entrypoint or "config.wsgi:application"}"]'
+    return f'CMD ["uvicorn", "{entrypoint}", "--host", "0.0.0.0", "--port", "{port}"]'
+
+
 def _reliable_staging_dockerfile(app_dir: Path, analysis: dict) -> str:
     port = int(analysis.get("port") or 8000)
     entry = analysis.get("entrypoint") or "app.main:app"
     pm = (analysis.get("package_manager") or "").lower()
     lang = (analysis.get("language") or "").lower()
     python_base = choose_python_base_image(app_dir)
+    runtime_command = _python_runtime_command(analysis, entry, port)
+    runtime_dependency = "RUN pip install --no-cache-dir gunicorn\n" if analysis.get("framework") in {"Flask", "Django"} else ""
 
     existing_dockerfile = app_dir / "Dockerfile"
     # Only reuse the existing Dockerfile if it's simple enough to build;
@@ -258,11 +318,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc libsqlite3-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt || pip install --no-cache-dir -r requirements.txt --ignore-requires-python
 RUN pip install --no-cache-dir aiosqlite 2>/dev/null || true
-COPY . .
+{runtime_dependency}COPY . .
 RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE {port}
-CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
+{runtime_command}
 """
 
     if (app_dir / "uv.lock").exists() or pm == "uv":
@@ -276,10 +336,10 @@ COPY . .
 RUN pip install --no-cache-dir --upgrade pip && \\
     pip install --no-cache-dir . 2>/dev/null || \\
     pip install --no-cache-dir fastapi uvicorn sqlalchemy aiosqlite pydantic pydantic-settings
-RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
+{runtime_dependency}RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE {port}
-CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
+{runtime_command}
 """
 
     if (app_dir / "poetry.lock").exists() or pm == "poetry":
@@ -290,10 +350,10 @@ RUN pip install --no-cache-dir poetry
 COPY pyproject.toml* poetry.lock* ./
 RUN poetry config virtualenvs.create false && (poetry install --no-interaction --no-ansi || pip install --no-cache-dir fastapi uvicorn aiosqlite)
 COPY . .
-RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
+{runtime_dependency}RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE {port}
-CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
+{runtime_command}
 """
 
     if (app_dir / "pyproject.toml").exists():
@@ -303,10 +363,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc libsqlite3-
 COPY pyproject.toml .
 RUN pip install --no-cache-dir . || pip install --no-cache-dir fastapi uvicorn aiosqlite
 COPY . .
-RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
+{runtime_dependency}RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE {port}
-CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
+{runtime_command}
 """
 
     # For Python projects without requirements.txt / lockfiles (e.g. testdrivenio/fastapi-react)
@@ -324,6 +384,8 @@ CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
         pkgs_str = " ".join(["fastapi", "uvicorn", "aiosqlite"] + extra_pkgs)
         if analysis.get("framework") == "Flask":
             pkgs_str = "flask gunicorn aiosqlite " + " ".join(extra_pkgs)
+        elif analysis.get("framework") == "Django":
+            pkgs_str = "django gunicorn aiosqlite " + " ".join(extra_pkgs)
 
         return f"""FROM {python_base}
 WORKDIR /app
@@ -333,12 +395,12 @@ RUN pip install --no-cache-dir {pkgs_str}
 RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE {port}
-CMD ["uvicorn", "{entry}", "--host", "0.0.0.0", "--port", "{port}"]
+{runtime_command}
 """
 
     # Delegate to docker_agent for Node, Java, or other frameworks
     from app.agents.docker_agent import generate_dockerfile
-    res = generate_dockerfile(app_dir, analysis)
+    res = generate_dockerfile(app_dir, {**analysis, "has_dockerfile": False})
     if res.dockerfile:
         return res.dockerfile
 
@@ -385,13 +447,14 @@ def deploy_staging(
         if not app_dir.is_dir():
             app_dir = dest
         sanitize_requirements_file(app_dir)
-        analysis = _refresh_fastapi_entrypoint(app_dir, analysis)
+        analysis = _refresh_runtime_analysis(app_dir, analysis)
         existing_dockerfile = app_dir / "Dockerfile"
         # Bypass the repo's own Dockerfile if it uses BuildKit-only features
         # (e.g., RUN --mount, oven/bun, uv sync --frozen) that represent a
         # full CI/CD pipeline rather than a simple container build. We generate
         # a simpler, self-contained Dockerfile for the backend service only.
-        if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile):
+        requires_source_build = requires_prebuilt_java_artifact(existing_dockerfile)
+        if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile) and not requires_source_build:
             existing_content = existing_dockerfile.read_text(encoding="utf-8", errors="ignore")
             if (analysis.get("framework") or "").lower() == "fastapi" and _needs_fastapi_entrypoint_alignment(
                 existing_content, analysis.get("entrypoint")
@@ -405,14 +468,14 @@ def deploy_staging(
                 dockerfile_path = existing_dockerfile
                 context_dir = _determine_build_context(dest, app_dir, dockerfile_path, analysis.get("source_subdir"))
         else:
-            if existing_dockerfile.exists() and has_complex_dockerfile(existing_dockerfile):
+            if existing_dockerfile.exists() and (has_complex_dockerfile(existing_dockerfile) or requires_source_build):
                 logger.warning(
-                    "Repo Dockerfile uses BuildKit-only or multi-tool features; "
-                    "generating a compatible replacement for staging build."
+                    "Repo Dockerfile requires a source-build-compatible replacement for staging."
                 )
-            staging_content = dockerfile.strip()
-            if not staging_content:
-                staging_content = _reliable_staging_dockerfile(app_dir, analysis)
+            # Generated artifacts can be older than the current source or
+            # framework rules. Recreate them from the disposable clone so
+            # Java/React/Python runtimes always use the current detection.
+            staging_content = _reliable_staging_dockerfile(app_dir, analysis)
             if (analysis.get("framework") or "").lower() == "fastapi":
                 staging_content = _align_fastapi_dockerfile_entrypoint(
                     staging_content, analysis.get("entrypoint")
@@ -436,7 +499,8 @@ def deploy_staging(
             raise RuntimeError("No Kubernetes manifests found. Run analysis first.")
 
         port = int(analysis.get("port") or 8000)
-        env_vars = _collect_runtime_env(app_name, dest, port)
+        database = analysis.get("database")
+        env_vars = _collect_runtime_env(app_name, app_dir, port, database)
         patched = k8s_svc.patch_manifests_for_local(
             local_files, image=image, app_name=app_name, replicas=1, env_vars=env_vars
         )
@@ -459,9 +523,18 @@ def deploy_staging(
         patched["nodeport-service.yaml"] = _nodeport_service_manifest(
             app_name, port, node_port, namespace
         )
+        if database and "database.yaml" not in patched:
+            database_manifest = generate_database_manifest(app_name, database)
+            if database_manifest:
+                patched["database.yaml"] = database_manifest
 
         deploy_name = f"{app_name}-staging"
-        k8s_svc.apply_manifests(patched, namespace=namespace)
+        database_files = {name: content for name, content in patched.items() if name == "database.yaml"}
+        app_files = {name: content for name, content in patched.items() if name != "database.yaml"}
+        if database_files:
+            k8s_svc.apply_manifests(database_files, namespace=namespace)
+            k8s_svc.wait_rollout(f"{app_name}-db", namespace=namespace, timeout_s=240)
+        k8s_svc.apply_manifests(app_files, namespace=namespace)
         rollout = k8s_svc.wait_rollout(deploy_name, namespace=namespace, timeout_s=300)
         status = k8s_svc.get_deployment_status(deploy_name, namespace=namespace)
         smoke = k8s_svc.smoke_test(app_name, namespace=namespace)
@@ -528,11 +601,12 @@ def deploy_green(
         if not app_dir.is_dir():
             app_dir = dest
         sanitize_requirements_file(app_dir)
-        analysis = _refresh_fastapi_entrypoint(app_dir, analysis)
+        analysis = _refresh_runtime_analysis(app_dir, analysis)
 
         existing_dockerfile = app_dir / "Dockerfile"
         # Bypass complex Dockerfiles (bun, uv --mount, etc.) same as staging
-        if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile):
+        requires_source_build = requires_prebuilt_java_artifact(existing_dockerfile)
+        if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile) and not requires_source_build:
             existing_content = existing_dockerfile.read_text(encoding="utf-8", errors="ignore")
             if (analysis.get("framework") or "").lower() == "fastapi" and _needs_fastapi_entrypoint_alignment(
                 existing_content, analysis.get("entrypoint")
@@ -546,14 +620,11 @@ def deploy_green(
                 dockerfile_path = existing_dockerfile
                 context_dir = _determine_build_context(dest, app_dir, dockerfile_path, analysis.get("source_subdir"))
         else:
-            if existing_dockerfile.exists() and has_complex_dockerfile(existing_dockerfile):
+            if existing_dockerfile.exists() and (has_complex_dockerfile(existing_dockerfile) or requires_source_build):
                 logger.warning(
-                    "Repo Dockerfile uses BuildKit-only or multi-tool features; "
-                    "generating a compatible replacement for production build."
+                    "Repo Dockerfile requires a source-build-compatible replacement for production build."
                 )
-            staging_content = dockerfile.strip()
-            if not staging_content:
-                staging_content = _reliable_staging_dockerfile(app_dir, analysis)
+            staging_content = _reliable_staging_dockerfile(app_dir, analysis)
             if (analysis.get("framework") or "").lower() == "fastapi":
                 staging_content = _align_fastapi_dockerfile_entrypoint(
                     staging_content, analysis.get("entrypoint")
@@ -577,12 +648,17 @@ def deploy_green(
             raise RuntimeError("No Kubernetes manifests found.")
 
         port = int(analysis.get("port") or 8000)
-        env_vars = _collect_runtime_env(app_name, dest, port)
+        database = analysis.get("database")
+        env_vars = _collect_runtime_env(app_name, app_dir, port, database)
         patched = k8s_svc.patch_manifests_for_blue_green(
             local_files, image=image, app_name=app_name, version="green", replicas=2, env_vars=env_vars
         )
 
         deploy_name = f"{app_name}-green"
+        database_manifest = generate_database_manifest(app_name, database) if database else None
+        if database_manifest:
+            k8s_svc.apply_manifests({"database.yaml": database_manifest}, namespace=namespace)
+            k8s_svc.wait_rollout(f"{app_name}-db", namespace=namespace, timeout_s=240)
         k8s_svc.apply_manifests(patched, namespace=namespace)
         rollout = k8s_svc.wait_rollout(deploy_name, namespace=namespace, timeout_s=240)
         status = k8s_svc.get_deployment_status(deploy_name, namespace=namespace)

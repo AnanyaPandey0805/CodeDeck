@@ -33,6 +33,7 @@ from app.db.database import SessionLocal
 from app.db.models import Analysis, GeneratedFile, Project
 from app.graph.state import DeployMindState
 from app.services.github import cleanup_repository, clone_repository
+from app.services.deployment_contract import build_deployment_contract
 from app.services.pipeline import upsert_step
 from app.services.repository_ai import (
     build_repository_index,
@@ -298,6 +299,7 @@ def generate_kubernetes_node(state: DeployMindState) -> DeployMindState:
         analysis["kubernetes_result"] = result.model_dump()
         analysis["validation_result"] = validation.model_dump()
         files = {"Dockerfile": dockerfile, **result.files}
+        analysis["deployment_contract"] = build_deployment_contract(project_id, analysis, files).model_dump()
         _save_files(project_id, files)
         _save_analysis(project_id, analysis)
 

@@ -96,8 +96,12 @@ def apply_manifests(files: dict[str, str], namespace: str) -> None:
     ensure_namespace(namespace)
     with tempfile.TemporaryDirectory(prefix="deploymind-k8s-") as tmp:
         tmp_path = Path(tmp)
-        # apply RBAC first, then deployment/service
-        order = sorted(files.keys(), key=lambda n: 0 if "rbac" in n else 1)
+        # The application may connect on boot, so make its ephemeral database
+        # available before applying RBAC, application, and public Service.
+        order = sorted(
+            files.keys(),
+            key=lambda n: 0 if "database" in n else 1 if "rbac" in n else 2,
+        )
         for name in order:
             path = tmp_path / name
             path.write_text(files[name], encoding="utf-8")

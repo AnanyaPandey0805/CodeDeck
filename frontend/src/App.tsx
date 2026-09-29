@@ -313,6 +313,10 @@ export default function App() {
     findings?: Array<{ severity: string; file: string; message: string }>; summary?: string
   } | undefined
   const dockerResult = extra.docker_result as { message?: string; dockerfile?: string } | undefined
+  const deploymentContract = extra.deployment_contract as {
+    status?: string; target?: string; preview_path?: string; entrypoint?: string | null; summary?: string
+    checks?: Array<{ name: string; status: string; message: string }>
+  } | undefined
   const latestDeployment = deployments[0]
   const smokeResult = (latestDeployment?.details as { smoke?: Record<string, unknown> } | null)?.smoke
   const failureAnalysis = (latestDeployment?.details as { failure_analysis?: Record<string, unknown> } | null)?.failure_analysis
@@ -990,6 +994,41 @@ export default function App() {
                     </div>
                   )}
 
+                  {deploymentContract && (
+                    <div className={`rounded border p-4 text-xs ${
+                      deploymentContract.status === 'ready'
+                        ? 'border-emerald-700/30 bg-emerald-950/20'
+                        : deploymentContract.status === 'blocked'
+                          ? 'border-red-700/30 bg-red-950/20'
+                          : 'border-amber-700/30 bg-amber-950/20'
+                    }`}>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-[10px] uppercase tracking-widest text-zinc-500">Deployment Contract</div>
+                        <span className={`rounded border px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                          deploymentContract.status === 'ready' ? 'border-emerald-500/30 text-emerald-400' :
+                          deploymentContract.status === 'blocked' ? 'border-red-500/30 text-red-400' : 'border-amber-500/30 text-amber-400'
+                        }`}>{deploymentContract.status}</span>
+                      </div>
+                      <p className="mt-2 text-zinc-300">{deploymentContract.summary}</p>
+                      <div className="mt-3 grid gap-2 md:grid-cols-2">
+                        {deploymentContract.checks?.map(check => (
+                          <div key={check.name} className="rounded border border-zinc-800 bg-zinc-950/40 px-3 py-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-medium text-zinc-200">{check.name}</span>
+                              <span className={check.status === 'passed' ? 'text-emerald-400' : check.status === 'blocked' ? 'text-red-400' : 'text-amber-400'}>{check.status}</span>
+                            </div>
+                            <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">{check.message}</p>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-zinc-500">
+                        <span>Target: {deploymentContract.target}</span>
+                        {deploymentContract.entrypoint && <span>Entrypoint: {deploymentContract.entrypoint}</span>}
+                        <span>Preview: {deploymentContract.preview_path}</span>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Blue-Green Zero-Downtime Deployment Lifecycle Guide */}
                   <div className="rounded border border-zinc-800 bg-zinc-900/60 p-4">
                     <div className="flex items-center justify-between mb-2.5">
@@ -1166,6 +1205,11 @@ export default function App() {
                   {failureAnalysis && (
                     <div className="rounded border border-orange-700/30 bg-orange-950/20 p-4 text-xs">
                       <div className="text-[10px] uppercase tracking-widest text-orange-500 mb-2">Failure Analysis</div>
+                      {failureAnalysis.repository_status === 'incompatible_or_faulty' && (
+                        <div className="mb-2 rounded border border-red-700/40 bg-red-950/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-red-300">
+                          Repository incompatible or incomplete
+                        </div>
+                      )}
                       <p className="text-orange-200">{String(failureAnalysis.likely_cause ?? 'No analysis')}</p>
                       {Boolean(failureAnalysis.suggested_fix) && (
                         <p className="mt-2 text-orange-300/70">→ {String(failureAnalysis.suggested_fix)}</p>

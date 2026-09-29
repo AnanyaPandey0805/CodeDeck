@@ -65,7 +65,7 @@ CMD ["uvicorn", "{entrypoint}", "--host", "0.0.0.0", "--port", "{port}"]
 
 
 def _flask_dockerfile(entrypoint: str, port: int, has_requirements: bool) -> str:
-    module = entrypoint.split(":")[0] if entrypoint else "app"
+    target = entrypoint or "app:app"
     deps = (
         "COPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt gunicorn"
         if has_requirements
@@ -84,11 +84,12 @@ COPY . .
 USER appuser
 EXPOSE {port}
 
-CMD ["gunicorn", "-b", "0.0.0.0:{port}", "{module}:app"]
+CMD ["gunicorn", "-b", "0.0.0.0:{port}", "{target}"]
 """
 
 
-def _django_dockerfile(port: int, has_requirements: bool) -> str:
+def _django_dockerfile(entrypoint: str, port: int, has_requirements: bool) -> str:
+    target = entrypoint or "config.wsgi:application"
     deps = (
         "COPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt gunicorn"
         if has_requirements
@@ -107,16 +108,23 @@ COPY . .
 USER appuser
 EXPOSE {port}
 
-CMD ["gunicorn", "-b", "0.0.0.0:{port}", "config.wsgi:application"]
+CMD ["gunicorn", "-b", "0.0.0.0:{port}", "{target}"]
 """
 
 
-def _node_dockerfile(entrypoint: str, port: int, framework: str) -> str:
+def _node_dockerfile(entrypoint: str, port: int, framework: str, package_manager: str) -> str:
+    if package_manager == "yarn":
+        install = "corepack enable && yarn install --immutable || yarn install"
+    elif package_manager == "pnpm":
+        install = "corepack enable && pnpm install --frozen-lockfile"
+    else:
+        install = "npm ci || npm install" if package_manager == "npm" else "npm install"
     if "React" in framework and "Express" not in framework:
         return f"""FROM node:22-alpine AS build
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+COPY yarn.lock* pnpm-lock.yaml* ./
+RUN {install}
 COPY . .
 RUN npm run build
 
@@ -133,7 +141,8 @@ WORKDIR /app
 RUN addgroup -S app && adduser -S app -G app
 
 COPY package*.json ./
-RUN npm ci --omit=dev
+COPY yarn.lock* pnpm-lock.yaml* ./
+RUN {install}
 
 COPY . .
 
@@ -144,16 +153,33 @@ CMD ["node", "{start}"]
 """
 
 
-def _java_dockerfile(port: int) -> str:
-    return f"""FROM eclipse-temurin:21-jre-alpine
+def _java_dockerfile(port: int, package_manager: str, framework: str) -> str:
+    if package_manager == "gradle":
+        build_command = "if [ -f gradlew ]; then chmod +x gradlew && ./gradlew bootJar -x test; else gradle bootJar -x test; fi"
+        jar_path = "build/libs"
+        builder = "gradle:8.12-jdk21"
+    else:
+        build_command = "if [ -f mvnw ]; then chmod +x mvnw && ./mvnw -DskipTests package; else mvn -DskipTests package; fi"
+        jar_path = "target"
+        builder = "maven:3.9-eclipse-temurin-21"
+    if framework != "Spring Boot" and package_manager == "gradle":
+        build_command = "if [ -f gradlew ]; then chmod +x gradlew && ./gradlew build -x test; else gradle build -x test; fi"
+    return f"""FROM {builder} AS build
+
+WORKDIR /workspace
+COPY . .
+RUN {build_command}
+RUN JAR=$(find {jar_path} -maxdepth 1 -name '*.jar' ! -name '*original*' | head -n 1) && test -n "$JAR" && cp "$JAR" /tmp/app.jar
+
+FROM eclipse-temurin:21-jre
 
 WORKDIR /app
 
-RUN addgroup -S app && adduser -S app -G app
+RUN useradd --create-home --uid 1000 appuser
 
-COPY target/*.jar app.jar
+COPY --from=build /tmp/app.jar app.jar
 
-USER app
+USER appuser
 EXPOSE {port}
 
 ENTRYPOINT ["java", "-jar", "app.jar"]
@@ -230,11 +256,11 @@ CMD ["uvicorn", "{entrypoint}", "--host", "0.0.0.0", "--port", "{port}"]
     elif framework == "Flask":
         content = _flask_dockerfile(entrypoint, port, has_req).replace("FROM python:3.11-slim", f"FROM {python_base}", 1)
     elif framework == "Django":
-        content = _django_dockerfile(port, has_req).replace("FROM python:3.11-slim", f"FROM {python_base}", 1)
+        content = _django_dockerfile(entrypoint, port, has_req).replace("FROM python:3.11-slim", f"FROM {python_base}", 1)
     elif language == "JavaScript":
-        content = _node_dockerfile(entrypoint or "index.js", port, framework)
+        content = _node_dockerfile(entrypoint or "index.js", port, framework, pm)
     elif language == "Java":
-        content = _java_dockerfile(port)
+        content = _java_dockerfile(port, pm, framework)
     elif language == "Python":
         content = f"""FROM {python_base}
 

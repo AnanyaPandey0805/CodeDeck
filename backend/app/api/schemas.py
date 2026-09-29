@@ -125,3 +125,18 @@ class GeneratedTestRunOut(BaseModel):
     stderr: str = ""
     failure_analysis: dict | None = None
     test_inferences: list[TestInferenceOut] = []
+
+
+class DeploymentContractCheckOut(BaseModel):
+    name: str
+    status: str
+    message: str
+
+
+class DeploymentContractOut(BaseModel):
+    status: str
+    target: str
+    preview_path: str
+    entrypoint: str | None = None
+    checks: list[DeploymentContractCheckOut]
+    summary: str

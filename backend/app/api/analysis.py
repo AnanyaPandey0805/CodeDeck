@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import (
     AnalysisOut,
+    DeploymentContractOut,
     EvaluationOut,
     GeneratedFileOut,
     GeneratedTestRunOut,
@@ -23,6 +24,7 @@ from app.services.repository_ai import (
     evaluate_repository_index,
     run_ai_generated_tests,
 )
+from app.services.deployment_contract import build_deployment_contract
 
 router = APIRouter(prefix="/api/projects", tags=["analysis"])
 logger = logging.getLogger("deploymind")
@@ -82,6 +84,20 @@ def get_pipeline(project_id: int, db: Session = Depends(get_db)):
 def get_files(project_id: int, db: Session = Depends(get_db)):
     _get_project(project_id, db)
     return db.query(GeneratedFile).filter(GeneratedFile.project_id == project_id).all()
+
+
+@router.get("/{project_id}/deployment-contract", response_model=DeploymentContractOut)
+def get_deployment_contract(project_id: int, db: Session = Depends(get_db)):
+    _get_project(project_id, db)
+    analysis = db.query(Analysis).filter(Analysis.project_id == project_id).first()
+    if not analysis:
+        raise HTTPException(status_code=400, detail="Run analysis before checking deployment readiness")
+
+    files = {
+        row.filename: row.content
+        for row in db.query(GeneratedFile).filter(GeneratedFile.project_id == project_id).all()
+    }
+    return build_deployment_contract(project_id, dict(analysis.analysis_result or {}), files)
 
 
 @router.post("/{project_id}/qa", response_model=RepositoryAnswerOut)

@@ -21,6 +21,10 @@ _BUILDKIT_REQUIRED_PATTERNS = re.compile(
     r"|bun\s+run\s+build",
     re.IGNORECASE,
 )
+_PREBUILT_JAVA_ARTIFACT_PATTERN = re.compile(
+    r"\b(?:COPY|ADD)\s+(?:--\S+\s+)*(?:target/|build/libs/)",
+    re.IGNORECASE,
+)
 
 
 def has_complex_dockerfile(path: Path) -> bool:
@@ -31,7 +35,17 @@ def has_complex_dockerfile(path: Path) -> bool:
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
         return bool(_BUILDKIT_REQUIRED_PATTERNS.search(text))
-    except Exception:
+    except OSError:
+        return False
+
+
+def requires_prebuilt_java_artifact(path: Path) -> bool:
+    """Return True when a Dockerfile expects CI to have built a JAR first."""
+    if not path.is_file():
+        return False
+    try:
+        return bool(_PREBUILT_JAVA_ARTIFACT_PATTERN.search(path.read_text(encoding="utf-8", errors="ignore")))
+    except OSError:
         return False
 
 

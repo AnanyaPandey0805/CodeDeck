@@ -45,6 +45,33 @@ def test_spring_boot_detection(tmp_path: Path):
     assert result.package_manager == "maven"
 
 
+def test_full_stack_repo_prefers_spring_boot_backend_and_detects_postgres(tmp_path: Path):
+    (tmp_path / "package.json").write_text('{"dependencies":{"react":"^19.0.0"}}', encoding="utf-8")
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "pom.xml").write_text(
+        "<project><dependencies><dependency>spring-boot-starter-web</dependency>"
+        "<dependency>postgresql</dependency></dependencies></project>",
+        encoding="utf-8",
+    )
+
+    result = analyze_repository(tmp_path)
+
+    assert result.framework == "Spring Boot"
+    assert result.language == "Java"
+    assert result.source_subdir == "backend"
+    assert result.database == "postgresql"
+
+
+def test_react_static_site_uses_nginx_port(tmp_path: Path):
+    (tmp_path / "package.json").write_text('{"dependencies":{"react":"^19.0.0","vite":"^6.0.0"}}', encoding="utf-8")
+
+    result = analyze_repository(tmp_path)
+
+    assert result.framework == "React"
+    assert result.port == 80
+
+
 def test_unsupported(tmp_path: Path):
     (tmp_path / "README.md").write_text("# hello\n", encoding="utf-8")
     result = analyze_repository(tmp_path)

@@ -20,6 +20,7 @@ from app.db.models import Analysis, Deployment, GeneratedFile, Project
 from app.services import kubernetes as k8s_svc
 from app.services.pipeline import upsert_step
 from app.services.repository_ai import analyze_deployment_failure
+from app.services.deployment_contract import build_deployment_contract
 
 router = APIRouter(prefix="/api/projects", tags=["deployments"])
 logger = logging.getLogger("deploymind")
@@ -180,6 +181,9 @@ def deploy_staging(project_id: int, background_tasks: BackgroundTasks, db: Sessi
     k8s_files = {k: v for k, v in files.items() if k != "Dockerfile"}
     if not dockerfile or not k8s_files:
         return _fail("staging", "Generated Dockerfile/Kubernetes files are missing")
+    contract = build_deployment_contract(project_id, dict(analysis.analysis_result or {}), files)
+    if contract.status == "blocked":
+        return _fail("staging", contract.summary, "; ".join(check.message for check in contract.checks if check.status == "blocked"))
 
     upsert_step(db, project_id, "Staging", "running")
     project.status = "deploying"

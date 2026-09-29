@@ -1,11 +1,13 @@
 from app.agents.deployment_agent import (
     _adjust_python_base_image,
     _align_fastapi_dockerfile_entrypoint,
+    _collect_runtime_env,
+    _reliable_staging_dockerfile,
     _refresh_fastapi_entrypoint,
 )
 from app.agents.docker_agent import generate_dockerfile
-from app.agents.kubernetes_agent import generate_kubernetes, sanitize_name
-from app.agents.validate import validate_configuration, validate_dockerfile
+from app.agents.kubernetes_agent import generate_database_manifest, generate_kubernetes, sanitize_name
+from app.agents.validate import validate_configuration, validate_dockerfile, validate_k8s_yaml
 
 
 def test_sanitize_name():
@@ -83,6 +85,74 @@ def test_keeps_existing_dockerfile(tmp_path):
     assert result.generated is False
     assert result.dockerfile == existing
     assert result.suggestions
+
+
+def test_generate_spring_boot_dockerfile_builds_source(tmp_path):
+    (tmp_path / "pom.xml").write_text("<project/>", encoding="utf-8")
+    result = generate_dockerfile(
+        tmp_path,
+        {"language": "Java", "framework": "Spring Boot", "package_manager": "maven", "port": 8080},
+    )
+
+    assert "FROM maven:3.9-eclipse-temurin-21 AS build" in result.dockerfile
+    assert "mvn -DskipTests package" in result.dockerfile
+    assert "COPY --from=build /tmp/app.jar app.jar" in result.dockerfile
+
+
+def test_generate_react_dockerfile_matches_nginx_port(tmp_path):
+    (tmp_path / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
+    result = generate_dockerfile(
+        tmp_path,
+        {"language": "JavaScript", "framework": "React", "package_manager": "npm", "port": 80},
+    )
+
+    assert "FROM nginx:1.27-alpine" in result.dockerfile
+    assert "EXPOSE 80" in result.dockerfile
+
+
+def test_database_manifest_is_valid_and_database_aware():
+    manifest = generate_database_manifest("demo-api", "postgresql")
+
+    assert manifest is not None
+    assert "postgres:16-alpine" in manifest
+    assert "demo-api-db" in manifest
+    assert validate_k8s_yaml("database.yaml", manifest) == []
+
+
+def test_staging_database_environment_targets_in_cluster_postgres(tmp_path):
+    env = _collect_runtime_env("demo-api", tmp_path, 8080, "postgresql")
+
+    assert env["SPRING_DATASOURCE_URL"] == "jdbc:postgresql://demo-api-db:5432/app"
+    assert env["DATABASE_URL"] == "postgresql://deploymind:deploymind@demo-api-db:5432/app"
+
+
+def test_reliable_staging_rebuilds_spring_boot_source(tmp_path):
+    (tmp_path / "pom.xml").write_text("<project/>", encoding="utf-8")
+
+    dockerfile = _reliable_staging_dockerfile(
+        tmp_path,
+        {"language": "Java", "framework": "Spring Boot", "package_manager": "maven", "port": 8080},
+    )
+
+    assert "FROM maven:3.9-eclipse-temurin-21 AS build" in dockerfile
+
+
+def test_staging_recognizes_java_dockerfile_that_needs_a_prebuilt_jar(tmp_path):
+    from app.services.docker import requires_prebuilt_java_artifact
+
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM eclipse-temurin:21-jre\nCOPY target/*.jar app.jar\n", encoding="utf-8")
+
+    assert requires_prebuilt_java_artifact(dockerfile)
+
+
+def test_staging_recognizes_buildkit_only_dockerfile(tmp_path):
+    from app.services.docker import has_complex_dockerfile
+
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM python:3.11-slim\nRUN --mount=type=cache pip install -r requirements.txt\n", encoding="utf-8")
+
+    assert has_complex_dockerfile(dockerfile)
 
 
 def test_generate_kubernetes_and_validate():

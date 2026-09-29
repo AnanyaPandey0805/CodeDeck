@@ -20,6 +20,93 @@ def sanitize_name(name: str) -> str:
     return (name or "app")[:63]
 
 
+def generate_database_manifest(app_name: str, database: str | None) -> str | None:
+    """Create an isolated, ephemeral database for local staging only."""
+    if database == "postgresql":
+        image = "postgres:16-alpine"
+        env = """            - name: POSTGRES_DB
+              value: app
+            - name: POSTGRES_USER
+              value: deploymind
+            - name: POSTGRES_PASSWORD
+              value: deploymind"""
+        port = 5432
+    elif database == "mysql":
+        image = "mysql:8.4"
+        env = """            - name: MYSQL_DATABASE
+              value: app
+            - name: MYSQL_USER
+              value: deploymind
+            - name: MYSQL_PASSWORD
+              value: deploymind
+            - name: MYSQL_ROOT_PASSWORD
+              value: deploymind-root"""
+        port = 3306
+    else:
+        return None
+
+    name = f"{app_name}-db"
+    return f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {name}
+  labels:
+    app: {name}
+    managed-by: deploymind
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {name}
+  template:
+    metadata:
+      labels:
+        app: {name}
+    spec:
+      containers:
+        - name: database
+          image: {image}
+          ports:
+            - containerPort: {port}
+          env:
+{env}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            tcpSocket:
+              port: {port}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: {port}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {name}
+  labels:
+    app: {name}
+spec:
+  selector:
+    app: {name}
+  ports:
+    - name: database
+      port: {port}
+      targetPort: {port}
+"""
+
+
 def generate_kubernetes(analysis: dict, app_name: str | None = None) -> KubernetesResult:
     name = sanitize_name(app_name or analysis.get("repository_name") or "app")
     port = int(analysis.get("port") or 8000)
@@ -134,6 +221,9 @@ subjects:
         "service.yaml": service.strip() + "\n",
         "rbac.yaml": rbac.strip() + "\n",
     }
+    database = generate_database_manifest(name, analysis.get("database"))
+    if database:
+        files["database.yaml"] = database
     logger.info("Kubernetes manifests generated")
     return KubernetesResult(
         files=files,

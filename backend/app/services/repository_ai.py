@@ -910,18 +910,36 @@ def explain_failure(error: str, evidence: list[str] | None = None, command: str 
     text = " ".join(evidence + [error]).lower()
     category = "GENERAL_FAILURE"
 
-    if "pydantic" in text and ("validation error" in text or "field required" in text or "validationerror" in text):
+    repository_status = "unknown"
+    if "failed to connect to the docker api" in text or "dockerdesktoplinuxengine" in text or "docker daemon is not running" in text:
+        category = "DOCKER_UNAVAILABLE"
+        cause = "Docker Desktop is not running, so DeployMind cannot build images or reach the local kind cluster."
+        fix = "Start Docker Desktop, wait for the Linux engine to become ready, then create or start the kind cluster and retry staging."
+    elif "error loading asgi app" in text or "attribute \"app\" not found" in text:
+        category = "ENTRYPOINT_MISMATCH"
+        cause = "The container command points to a Python module or application attribute that does not exist."
+        fix = "Confirm the detected FastAPI/Flask entrypoint and regenerate the deployment artifacts."
+        repository_status = "incompatible_or_faulty"
+    elif "pydantic" in text and ("validation error" in text or "field required" in text or "validationerror" in text):
         category = "SETTINGS_VALIDATION"
         cause = "The application failed to initialize because required configuration settings or environment variables were missing."
         fix = "Configure required environment variables (e.g. SECRET_KEY, DATABASE_URL, FIRST_SUPERUSER) in the test environment or .env file."
+        repository_status = "incompatible_or_faulty"
     elif "no module named" in text or "modulenotfounderror" in text or "importerror" in text:
         category = "IMPORT_ERROR"
         cause = "The generated test ran from an unexpected Python import path, or a repository module was missing."
         fix = "Verify the repository layout and make sure dependencies are listed in requirements.txt or pyproject.toml."
+        repository_status = "incompatible_or_faulty"
     elif "could not find a version that satisfies the requirement" in text or "no matching distribution found" in text:
         category = "DEPENDENCY_INSTALL_FAILED"
         cause = "Repository dependency installation failed before the generated tests could run."
         fix = "Check the repository dependency file for invalid or private-only packages, then retry the AI-generated tests."
+        repository_status = "incompatible_or_faulty"
+    elif any(marker in text for marker in ("maven", "gradle", "npm err", "could not resolve dependencies", "failed to execute goal", "jar file")):
+        category = "REPOSITORY_BUILD_FAILED"
+        cause = "The repository source could not complete its declared application build in the staging image."
+        fix = "Fix the build error in pom.xml, build.gradle, package.json, or the application source, then re-run analysis and staging."
+        repository_status = "incompatible_or_faulty"
     elif "crashloopbackoff" in text or "module not found" in text:
         category = "CRASH_LOOP"
         cause = "The application is starting but crashing during boot."
@@ -938,6 +956,7 @@ def explain_failure(error: str, evidence: list[str] | None = None, command: str 
         category = "DATABASE_UNAVAILABLE"
         cause = "The deployment likely depends on a database configuration that is missing or unreachable."
         fix = "Check database environment variables, secrets, and network access."
+        repository_status = "incompatible_or_faulty"
     elif "kubernetes cluster not reachable" in text or "kind create cluster" in text or "no kind clusters found" in text:
         category = "CLUSTER_UNREACHABLE"
         cause = "DeployMind could not reach the local kind Kubernetes cluster."
@@ -972,6 +991,7 @@ def explain_failure(error: str, evidence: list[str] | None = None, command: str 
         "evidence": evidence,
         "suggested_fix": fix,
         "category": category,
+        "repository_status": repository_status,
     }
 
 

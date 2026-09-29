@@ -106,6 +106,12 @@ def test_failure_explanation_for_missing_kind_cluster(monkeypatch):
     assert "kind create cluster --name deploymind" in result["suggested_fix"]
 
 
+def test_failure_explanation_distinguishes_docker_platform_outage():
+    result = explain_failure("failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine")
+    assert result["category"] == "DOCKER_UNAVAILABLE"
+    assert result["repository_status"] == "unknown"
+
+
 def test_failure_explanation_for_invalid_dependency():
     result = explain_failure(
         "Dependency install failed before AI tests",
@@ -113,6 +119,13 @@ def test_failure_explanation_for_invalid_dependency():
     )
     assert "dependency installation failed" in result["likely_cause"].lower()
     assert "dependency file" in result["suggested_fix"].lower()
+    assert result["repository_status"] == "incompatible_or_faulty"
+
+
+def test_failure_explanation_identifies_repository_build_failure():
+    result = explain_failure("Docker build failed", ["Failed to execute goal org.springframework.boot:spring-boot-maven-plugin"])
+    assert result["category"] == "REPOSITORY_BUILD_FAILED"
+    assert result["repository_status"] == "incompatible_or_faulty"
 
 
 def test_fastapi_generated_test_file_uses_fixture():
@@ -173,4 +186,3 @@ def test_failure_explanation_categories():
     r2 = explain_failure("AssertionError: 401 != 200", ["Status 401 Unauthorized", "Not authenticated"])
     assert r2["category"] == "AUTHENTICATION_REQUIRED"
     assert "authorization" in r2["suggested_fix"].lower()
-
