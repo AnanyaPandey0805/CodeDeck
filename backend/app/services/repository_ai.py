@@ -979,6 +979,11 @@ def explain_failure(error: str, evidence: list[str] | None = None, command: str 
         cause = "Repository dependency installation failed before the generated tests could run."
         fix = "Check the repository dependency file for invalid or private-only packages, then retry the AI-generated tests."
         repository_status = "incompatible_or_faulty"
+    elif "uid 1000 is not unique" in text:
+        category = "STAGING_IMAGE_USER_COLLISION"
+        cause = "The generated staging image tried to create UID 1000, but its base image already contains that UID."
+        fix = "Reuse the existing UID 1000 account in the generated runtime image; the repository source and Maven build are not the cause."
+        repository_status = "staging_configuration_issue"
     elif any(marker in text for marker in ("maven", "gradle", "npm err", "could not resolve dependencies", "failed to execute goal", "jar file")):
         category = "REPOSITORY_BUILD_FAILED"
         cause = "The repository source could not complete its declared application build in the staging image."

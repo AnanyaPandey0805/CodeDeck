@@ -175,11 +175,11 @@ FROM eclipse-temurin:21-jre
 
 WORKDIR /app
 
-RUN useradd --create-home --uid 1000 appuser
+RUN if ! getent passwd 1000 >/dev/null; then useradd --create-home --uid 1000 appuser; fi
 
 COPY --from=build /tmp/app.jar app.jar
 
-USER appuser
+USER 1000
 EXPOSE {port}
 
 ENTRYPOINT ["java", "-jar", "app.jar"]
