@@ -75,6 +75,19 @@ def build_deployment_contract(
             )
         )
 
+    dependencies = analysis.get("staging_dependencies") or []
+    if dependencies:
+        checks.append(
+            DeploymentContractCheck(
+                name="Required services",
+                status="passed",
+                message=(
+                    "Local staging will create: "
+                    + ", ".join(str(item) for item in dependencies)
+                ),
+            )
+        )
+
     docker_errors = validate_dockerfile(dockerfile) if dockerfile else ["Dockerfile is empty"]
     checks.append(
         DeploymentContractCheck(

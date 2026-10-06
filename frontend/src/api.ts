@@ -125,7 +125,7 @@ export type SystemStatus = {
   docker: { ok: boolean; message: string };
   kind: { ok: boolean; available: boolean; clusters: string[]; message: string };
   kubectl: { ok: boolean; message: string };
-  ai_provider?: { provider: string; model: string; status: string };
+  ai_provider?: { provider: string; model: string; status: string; message?: string };
 };
 
 export const getHealth = () => request<{ status: string; service: string }>('/health');
@@ -141,6 +141,7 @@ export const askRepositoryQuestion = (id: number, question: string) => request<R
 export const getEvaluation = (id: number) => request<Evaluation>(`/api/projects/${id}/evaluation`);
 export const runAiTests = (id: number) => request<GeneratedTestRun>(`/api/projects/${id}/ai-tests`, { method: 'POST' });
 export const deployStaging = (id: number) => request<{ status: string; message: string }>(`/api/projects/${id}/deploy/staging`, { method: 'POST' });
+export const cancelStaging = (id: number) => request<{ status: string; message: string }>(`/api/projects/${id}/deploy/staging/cancel`, { method: 'POST' });
 export const deployProduction = (id: number) => request<{ status: string; message: string }>(`/api/projects/${id}/deploy/production`, { method: 'POST' });
 export const approveProduction = (id: number) => request<{ status: string; message: string }>(`/api/projects/${id}/deploy/production/approve`, { method: 'POST' });
 export const rollbackProduction = (id: number) => request<{ status: string; message: string }>(`/api/projects/${id}/rollback`, { method: 'POST' });

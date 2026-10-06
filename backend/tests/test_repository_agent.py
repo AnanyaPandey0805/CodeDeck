@@ -45,6 +45,26 @@ def test_spring_boot_detection(tmp_path: Path):
     assert result.package_manager == "maven"
 
 
+def test_spring_boot_detects_postgis_redis_and_kafka_dependencies(tmp_path: Path):
+    (tmp_path / "pom.xml").write_text(
+        "<project><dependencies><dependency>spring-boot-starter-web</dependency>"
+        "<dependency>hibernate-spatial</dependency><dependency>spring-kafka</dependency></dependencies></project>",
+        encoding="utf-8",
+    )
+    resources = tmp_path / "src" / "main" / "resources"
+    resources.mkdir(parents=True)
+    (resources / "application.properties").write_text(
+        "spring.data.redis.host=${REDIS_HOST:localhost}\n"
+        "spring.kafka.bootstrap-servers=${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}\n",
+        encoding="utf-8",
+    )
+
+    result = analyze_repository(tmp_path)
+
+    assert result.database == "postgis"
+    assert result.staging_dependencies == ["redis", "kafka"]
+
+
 def test_full_stack_repo_prefers_spring_boot_backend_and_detects_postgres(tmp_path: Path):
     (tmp_path / "package.json").write_text('{"dependencies":{"react":"^19.0.0"}}', encoding="utf-8")
     backend = tmp_path / "backend"

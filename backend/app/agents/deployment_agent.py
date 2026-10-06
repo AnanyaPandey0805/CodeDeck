@@ -2,16 +2,22 @@ import logging
 import re
 import shutil
 from pathlib import Path
+from typing import Callable
 
 from pydantic import BaseModel, Field
 
-from app.agents.kubernetes_agent import generate_database_manifest, sanitize_name
+from app.agents.kubernetes_agent import generate_database_manifest, generate_dependency_manifest, sanitize_name
 from app.core.config import settings
 from app.services import docker as docker_svc
 from app.services import kubernetes as k8s_svc
 from app.services.dependency_sanitizer import choose_python_base_image, sanitize_requirements_file
-from app.services.docker import has_complex_dockerfile, requires_prebuilt_java_artifact
+from app.services.docker import (
+    has_complex_dockerfile,
+    requires_prebuilt_java_artifact,
+    requires_staging_dockerfile_replacement,
+)
 from app.services.github import cleanup_repository, clone_repository
+from app.services.deployment_control import DeploymentCancelled
 
 logger = logging.getLogger("deploymind")
 
@@ -53,6 +59,8 @@ def _refresh_runtime_analysis(app_dir: Path, analysis: dict) -> dict:
         current = analyze_repository(app_dir)
         if current.database:
             refreshed["database"] = current.database
+        if current.staging_dependencies:
+            refreshed["staging_dependencies"] = current.staging_dependencies
         if current.framework in {"Flask", "Django"} and current.entrypoint:
             refreshed["entrypoint"] = current.entrypoint
     except Exception:
@@ -114,7 +122,13 @@ spec:
 """
 
 
-def _collect_runtime_env(app_name: str, app_dir: Path, port: int, database: str | None = None) -> dict[str, str]:
+def _collect_runtime_env(
+    app_name: str,
+    app_dir: Path,
+    port: int,
+    database: str | None = None,
+    staging_dependencies: list[str] | None = None,
+) -> dict[str, str]:
     """Gather environment variables from .env files and provide standard defaults
     so apps requiring settings (like FastAPI templates) start cleanly."""
     env_vars: dict[str, str] = {}
@@ -167,7 +181,7 @@ def _collect_runtime_env(app_name: str, app_dir: Path, port: int, database: str 
     # Staging owns an ephemeral in-cluster database. Override developer .env
     # endpoints so the deployed pod never attempts to reach localhost or a
     # private production database.
-    if database == "postgresql":
+    if database in {"postgresql", "postgis"}:
         service = f"{app_name}-db"
         url = f"postgresql://deploymind:deploymind@{service}:5432/app"
         merged.update({
@@ -197,6 +211,11 @@ def _collect_runtime_env(app_name: str, app_dir: Path, port: int, database: str 
             "SPRING_DATASOURCE_USERNAME": "deploymind",
             "SPRING_DATASOURCE_PASSWORD": "deploymind",
         })
+    dependencies = set(staging_dependencies or [])
+    if "redis" in dependencies:
+        merged.update({"REDIS_HOST": f"{app_name}-redis", "REDIS_PORT": "6379"})
+    if "kafka" in dependencies:
+        merged["KAFKA_BOOTSTRAP_SERVERS"] = f"{app_name}-kafka:9092"
     # Replace placeholder passwords
     if "DATABASE_URL" in merged and "changethis" in merged["DATABASE_URL"]:
         merged["DATABASE_URL"] = merged["DATABASE_URL"].replace("changethis", "supersecretpassword123")
@@ -308,7 +327,11 @@ def _reliable_staging_dockerfile(app_dir: Path, analysis: dict) -> str:
     existing_dockerfile = app_dir / "Dockerfile"
     # Only reuse the existing Dockerfile if it's simple enough to build;
     # complex Dockerfiles (bun, uv --mount, multi-stage CI) need replacement.
-    if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile):
+    if (
+        existing_dockerfile.exists()
+        and not has_complex_dockerfile(existing_dockerfile)
+        and not requires_staging_dockerfile_replacement(existing_dockerfile)
+    ):
         return existing_dockerfile.read_text(encoding="utf-8", errors="ignore")
 
     if (app_dir / "requirements.txt").exists():
@@ -346,9 +369,9 @@ EXPOSE {port}
         return f"""FROM {python_base}
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libsqlite3-dev && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir poetry
+RUN pip install --no-cache-dir "poetry>=1.8,<2.0"
 COPY pyproject.toml* poetry.lock* ./
-RUN poetry config virtualenvs.create false && (poetry install --no-interaction --no-ansi || pip install --no-cache-dir fastapi uvicorn aiosqlite)
+RUN poetry config virtualenvs.create false && (poetry install --no-interaction --no-ansi --no-root --only main || poetry install --no-interaction --no-ansi --no-root)
 COPY . .
 {runtime_dependency}RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
@@ -425,6 +448,8 @@ def deploy_staging(
     analysis: dict,
     dockerfile: str,
     k8s_files: dict[str, str],
+    progress: Callable[[str], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> StagingDeployResult:
     app_name = sanitize_name(repository_name or analysis.get("repository_name") or "app")
     namespace = settings.k8s_namespace
@@ -434,6 +459,14 @@ def deploy_staging(
 
     logger.info("deployment started: staging %s", app_name)
 
+    def report(message: str) -> None:
+        if cancel_check and cancel_check():
+            raise DeploymentCancelled("Staging deployment canceled by user.")
+        logger.info("staging %s: %s", app_name, message)
+        if progress:
+            progress(message)
+
+    report("Checking Kubernetes cluster")
     k8s_svc.prepare_kubeconfig()
     if not k8s_svc.cluster_reachable():
         raise RuntimeError(
@@ -442,6 +475,7 @@ def deploy_staging(
         )
 
     try:
+        report("Preparing repository source")
         _prepare_deployment_source(project_id, repository_url, dest)
         app_dir = dest / analysis.get("source_subdir", "") if analysis.get("source_subdir") else dest
         if not app_dir.is_dir():
@@ -454,7 +488,8 @@ def deploy_staging(
         # full CI/CD pipeline rather than a simple container build. We generate
         # a simpler, self-contained Dockerfile for the backend service only.
         requires_source_build = requires_prebuilt_java_artifact(existing_dockerfile)
-        if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile) and not requires_source_build:
+        requires_replacement = requires_staging_dockerfile_replacement(existing_dockerfile)
+        if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile) and not requires_source_build and not requires_replacement:
             existing_content = existing_dockerfile.read_text(encoding="utf-8", errors="ignore")
             if (analysis.get("framework") or "").lower() == "fastapi" and _needs_fastapi_entrypoint_alignment(
                 existing_content, analysis.get("entrypoint")
@@ -468,7 +503,7 @@ def deploy_staging(
                 dockerfile_path = existing_dockerfile
                 context_dir = _determine_build_context(dest, app_dir, dockerfile_path, analysis.get("source_subdir"))
         else:
-            if existing_dockerfile.exists() and (has_complex_dockerfile(existing_dockerfile) or requires_source_build):
+            if existing_dockerfile.exists() and (has_complex_dockerfile(existing_dockerfile) or requires_source_build or requires_replacement):
                 logger.warning(
                     "Repo Dockerfile requires a source-build-compatible replacement for staging."
                 )
@@ -487,7 +522,9 @@ def deploy_staging(
                 analysis.get("source_subdir"),
             )
 
-        docker_svc.build_image(context_dir, dockerfile_path, image, timeout=1800)
+        report("Building container image")
+        docker_svc.build_image(context_dir, dockerfile_path, image, timeout=1800, cancel_check=cancel_check)
+        report("Loading image into kind")
         docker_svc.kind_load_image(image, cluster=cluster)
 
         local_files = {
@@ -500,7 +537,8 @@ def deploy_staging(
 
         port = int(analysis.get("port") or 8000)
         database = analysis.get("database")
-        env_vars = _collect_runtime_env(app_name, app_dir, port, database)
+        staging_dependencies = list(analysis.get("staging_dependencies") or [])
+        env_vars = _collect_runtime_env(app_name, app_dir, port, database, staging_dependencies)
         patched = k8s_svc.patch_manifests_for_local(
             local_files, image=image, app_name=app_name, replicas=1, env_vars=env_vars
         )
@@ -527,16 +565,33 @@ def deploy_staging(
             database_manifest = generate_database_manifest(app_name, database)
             if database_manifest:
                 patched["database.yaml"] = database_manifest
+        for dependency in staging_dependencies:
+            filename = f"dependency-{dependency}.yaml"
+            if filename not in patched:
+                manifest = generate_dependency_manifest(app_name, dependency)
+                if manifest:
+                    patched[filename] = manifest
 
         deploy_name = f"{app_name}-staging"
-        database_files = {name: content for name, content in patched.items() if name == "database.yaml"}
-        app_files = {name: content for name, content in patched.items() if name != "database.yaml"}
-        if database_files:
-            k8s_svc.apply_manifests(database_files, namespace=namespace)
-            k8s_svc.wait_rollout(f"{app_name}-db", namespace=namespace, timeout_s=240)
+        support_files = {
+            name: content for name, content in patched.items()
+            if name == "database.yaml" or name.startswith("dependency-")
+        }
+        app_files = {name: content for name, content in patched.items() if name not in support_files}
+        if support_files:
+            report("Starting staging services")
+            k8s_svc.apply_manifests(support_files, namespace=namespace)
+            if database:
+                k8s_svc.wait_rollout(f"{app_name}-db", namespace=namespace, timeout_s=240, cancel_check=cancel_check)
+            for dependency in staging_dependencies:
+                report(f"Waiting for staging {dependency}")
+                k8s_svc.wait_rollout(f"{app_name}-{dependency}", namespace=namespace, timeout_s=300, cancel_check=cancel_check)
+        report("Applying Kubernetes manifests")
         k8s_svc.apply_manifests(app_files, namespace=namespace)
-        rollout = k8s_svc.wait_rollout(deploy_name, namespace=namespace, timeout_s=300)
+        report("Waiting for application rollout")
+        rollout = k8s_svc.wait_rollout(deploy_name, namespace=namespace, timeout_s=300, cancel_check=cancel_check)
         status = k8s_svc.get_deployment_status(deploy_name, namespace=namespace)
+        report("Running staging smoke tests")
         smoke = k8s_svc.smoke_test(app_name, namespace=namespace)
 
         if smoke.get("status") != "passed":
@@ -544,6 +599,7 @@ def deploy_staging(
 
         access_url = f"http://localhost:3000/api/projects/{project_id}/preview/docs"
         smoke["url"] = access_url
+        report("Staging deployment healthy")
         logger.info("deployment completed: staging %s accessible at %s", app_name, access_url)
         return StagingDeployResult(
             status="healthy",
@@ -606,7 +662,8 @@ def deploy_green(
         existing_dockerfile = app_dir / "Dockerfile"
         # Bypass complex Dockerfiles (bun, uv --mount, etc.) same as staging
         requires_source_build = requires_prebuilt_java_artifact(existing_dockerfile)
-        if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile) and not requires_source_build:
+        requires_replacement = requires_staging_dockerfile_replacement(existing_dockerfile)
+        if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile) and not requires_source_build and not requires_replacement:
             existing_content = existing_dockerfile.read_text(encoding="utf-8", errors="ignore")
             if (analysis.get("framework") or "").lower() == "fastapi" and _needs_fastapi_entrypoint_alignment(
                 existing_content, analysis.get("entrypoint")
@@ -620,7 +677,7 @@ def deploy_green(
                 dockerfile_path = existing_dockerfile
                 context_dir = _determine_build_context(dest, app_dir, dockerfile_path, analysis.get("source_subdir"))
         else:
-            if existing_dockerfile.exists() and (has_complex_dockerfile(existing_dockerfile) or requires_source_build):
+            if existing_dockerfile.exists() and (has_complex_dockerfile(existing_dockerfile) or requires_source_build or requires_replacement):
                 logger.warning(
                     "Repo Dockerfile requires a source-build-compatible replacement for production build."
                 )
@@ -649,16 +706,27 @@ def deploy_green(
 
         port = int(analysis.get("port") or 8000)
         database = analysis.get("database")
-        env_vars = _collect_runtime_env(app_name, app_dir, port, database)
+        staging_dependencies = list(analysis.get("staging_dependencies") or [])
+        env_vars = _collect_runtime_env(app_name, app_dir, port, database, staging_dependencies)
         patched = k8s_svc.patch_manifests_for_blue_green(
             local_files, image=image, app_name=app_name, version="green", replicas=2, env_vars=env_vars
         )
 
         deploy_name = f"{app_name}-green"
+        support_files: dict[str, str] = {}
         database_manifest = generate_database_manifest(app_name, database) if database else None
         if database_manifest:
-            k8s_svc.apply_manifests({"database.yaml": database_manifest}, namespace=namespace)
-            k8s_svc.wait_rollout(f"{app_name}-db", namespace=namespace, timeout_s=240)
+            support_files["database.yaml"] = database_manifest
+        for dependency in staging_dependencies:
+            manifest = generate_dependency_manifest(app_name, dependency)
+            if manifest:
+                support_files[f"dependency-{dependency}.yaml"] = manifest
+        if support_files:
+            k8s_svc.apply_manifests(support_files, namespace=namespace)
+            if database:
+                k8s_svc.wait_rollout(f"{app_name}-db", namespace=namespace, timeout_s=240)
+            for dependency in staging_dependencies:
+                k8s_svc.wait_rollout(f"{app_name}-{dependency}", namespace=namespace, timeout_s=300)
         k8s_svc.apply_manifests(patched, namespace=namespace)
         rollout = k8s_svc.wait_rollout(deploy_name, namespace=namespace, timeout_s=240)
         status = k8s_svc.get_deployment_status(deploy_name, namespace=namespace)

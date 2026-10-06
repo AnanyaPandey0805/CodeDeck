@@ -22,8 +22,8 @@ def sanitize_name(name: str) -> str:
 
 def generate_database_manifest(app_name: str, database: str | None) -> str | None:
     """Create an isolated, ephemeral database for local staging only."""
-    if database == "postgresql":
-        image = "postgres:16-alpine"
+    if database in {"postgresql", "postgis"}:
+        image = "postgis/postgis:16-3.4" if database == "postgis" else "postgres:16-alpine"
         env = """            - name: POSTGRES_DB
               value: app
             - name: POSTGRES_USER
@@ -70,9 +70,6 @@ spec:
             - containerPort: {port}
           env:
 {env}
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
           resources:
             requests:
               cpu: 100m
@@ -102,6 +99,96 @@ spec:
     app: {name}
   ports:
     - name: database
+      port: {port}
+      targetPort: {port}
+"""
+
+
+def generate_dependency_manifest(app_name: str, dependency: str) -> str | None:
+    """Create local-only Redis or Kafka services required by an application."""
+    name = f"{app_name}-{dependency}"
+    if dependency == "redis":
+        image, port = "redis:7-alpine", 6379
+        command = "          args: [\"redis-server\", \"--appendonly\", \"yes\"]\n"
+        probe = "            exec:\n              command: [\"redis-cli\", \"ping\"]"
+    elif dependency == "kafka":
+        image, port = "apache/kafka:3.7.0", 9092
+        command = """          env:
+            - name: KAFKA_NODE_ID
+              value: \"1\"
+            - name: KAFKA_PROCESS_ROLES
+              value: broker,controller
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: 1@{name}:9093
+            - name: KAFKA_LISTENERS
+              value: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: PLAINTEXT://{name}:9092
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: CONTROLLER
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: PLAINTEXT
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: \"1\"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: \"0\"
+""".format(name=name)
+        probe = f"""            tcpSocket:
+              port: {port}"""
+    else:
+        return None
+
+    return f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {name}
+  labels:
+    app: {name}
+    managed-by: deploymind
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {name}
+  template:
+    metadata:
+      labels:
+        app: {name}
+    spec:
+      containers:
+        - name: {dependency}
+          image: {image}
+          ports:
+            - containerPort: {port}
+{command}          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 750m
+              memory: 768Mi
+          readinessProbe:
+{probe}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+{probe}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {name}
+  labels:
+    app: {name}
+spec:
+  selector:
+    app: {name}
+  ports:
+    - name: {dependency}
       port: {port}
       targetPort: {port}
 """
@@ -224,6 +311,10 @@ subjects:
     database = generate_database_manifest(name, analysis.get("database"))
     if database:
         files["database.yaml"] = database
+    for dependency in analysis.get("staging_dependencies") or []:
+        manifest = generate_dependency_manifest(name, dependency)
+        if manifest:
+            files[f"dependency-{dependency}.yaml"] = manifest
     logger.info("Kubernetes manifests generated")
     return KubernetesResult(
         files=files,

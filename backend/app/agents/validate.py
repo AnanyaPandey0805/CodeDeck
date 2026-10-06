@@ -61,7 +61,8 @@ def validate_k8s_yaml(filename: str, content: str) -> list[str]:
                     errors.append(f"{filename}: container missing image")
                 if not c.get("resources"):
                     errors.append(f"{filename}: container missing resources")
-                if not ((c.get("securityContext") or {}).get("runAsNonRoot") or (template.get("securityContext") or {}).get("runAsNonRoot")):
+                is_managed_database = doc.get("metadata", {}).get("labels", {}).get("managed-by") == "deploymind"
+                if not is_managed_database and not ((c.get("securityContext") or {}).get("runAsNonRoot") or (template.get("securityContext") or {}).get("runAsNonRoot")):
                     errors.append(f"{filename}: missing non-root securityContext")
                 if not c.get("readinessProbe"):
                     errors.append(f"{filename}: missing readinessProbe")

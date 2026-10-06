@@ -7,10 +7,12 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from collections.abc import Callable
 
 import httpx
 
 from app.core.config import settings
+from app.services.deployment_control import DeploymentCancelled
 
 logger = logging.getLogger("deploymind")
 
@@ -111,7 +113,12 @@ def apply_manifests(files: dict[str, str], namespace: str) -> None:
             logger.info("applied %s", name)
 
 
-def wait_rollout(deployment: str, namespace: str, timeout_s: int = 300) -> str:
+def wait_rollout(
+    deployment: str,
+    namespace: str,
+    timeout_s: int = 300,
+    cancel_check: Callable[[], bool] | None = None,
+) -> str:
     """Wait for rollout to complete, aborting early if pods crash-loop."""
     import time
 
@@ -120,6 +127,8 @@ def wait_rollout(deployment: str, namespace: str, timeout_s: int = 300) -> str:
     poll_interval = 15
 
     while time.time() < deadline:
+        if cancel_check and cancel_check():
+            raise DeploymentCancelled("Staging deployment canceled while waiting for Kubernetes rollout.")
         # Check pod status for early exit on crash
         pod_proc = _run(
             ["kubectl", "get", "pods", "-n", namespace, "-l", f"app={deployment.removesuffix('-staging').removesuffix('-green').removesuffix('-blue')}",
@@ -164,7 +173,22 @@ def wait_rollout(deployment: str, namespace: str, timeout_s: int = 300) -> str:
     )
     out = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode != 0:
-        raise RuntimeError(f"Rollout failed: {out[-2000:]}")
+        pod_proc = _run(
+            ["kubectl", "get", "pods", "-n", namespace, "-l", f"app={deployment.removesuffix('-staging').removesuffix('-green').removesuffix('-blue')}", "-o", "wide"],
+            timeout=20,
+        )
+        pods = (pod_proc.stdout or pod_proc.stderr or "").strip()
+        pod_names = re.findall(r"^([^\s]+)", pods, flags=re.MULTILINE)
+        logs = ""
+        if len(pod_names) > 1:
+            log_proc = _run(["kubectl", "logs", "-n", namespace, pod_names[1], "--tail=80"], timeout=20)
+            logs = (log_proc.stdout or log_proc.stderr or "").strip()
+        detail = f"Rollout failed: {out[-1600:]}"
+        if pods:
+            detail += f"\nPods:\n{pods[-1200:]}"
+        if logs:
+            detail += f"\nContainer logs:\n{logs[-1800:]}"
+        raise RuntimeError(detail)
     logger.info("rollout complete for %s", deployment)
     return out.strip() or "rollout complete"
 

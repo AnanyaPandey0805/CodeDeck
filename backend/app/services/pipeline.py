@@ -27,7 +27,9 @@ def upsert_step(
     if status == "running":
         step.started_at = now
         step.completed_at = None
-        step.result = None
+        # Background jobs can provide a live phase (for example, image build
+        # or rollout) while remaining in the running state.
+        step.result = result
         step.error = None
     elif status in {"completed", "failed", "warning"}:
         step.completed_at = now

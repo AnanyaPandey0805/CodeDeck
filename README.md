@@ -14,7 +14,7 @@ GitHub Repo -> Analysis -> RAG Q&A -> AI Testing -> Docker Build -> Kubernetes D
 |--------|--------------|
 | **Backend** | FastAPI, Python, PostgreSQL (SQLAlchemy), LangGraph |
 | **Frontend** | React 19, TypeScript, Vite, Tailwind CSS v4 |
-| **AI / NLP** | OpenAI `gpt-4.1-mini`, Hash-based Embeddings (192-dim), Cosine Similarity |
+| **AI / NLP** | OpenAI, Groq, or xAI with hash-based embeddings (192-dim) and cosine similarity |
 | **DevOps** | Docker, kind (Kubernetes in Docker), kubectl |
 
 ## Quick Start
@@ -23,13 +23,13 @@ GitHub Repo -> Analysis -> RAG Q&A -> AI Testing -> Docker Build -> Kubernetes D
 - Docker & Docker Compose
 - `kind` CLI installed
 - `kubectl` CLI installed
-- OpenAI API Key
+- An API key for OpenAI, Groq, or xAI (optional; grounded heuristic Q&A remains available)
 
 ### Setup Instructions
 
 1. **Ensure the kind cluster is running:**
    ```bash
-   kind create cluster --name codedeck-cluster
+   kind create cluster --name deploymind
    ```
 
 2. **Start the platform:**
@@ -41,6 +41,12 @@ GitHub Repo -> Analysis -> RAG Q&A -> AI Testing -> Docker Build -> Kubernetes D
    - Frontend Dashboard: `http://localhost:3000`
    - Backend API Docs: `http://localhost:8000/docs`
 
+4. **Configure AI-backed repository Q&A (optional):**
+   - Set `OPENAI_API_KEY` for OpenAI.
+   - Set `GROQ_API_KEY` for Groq, or use a `gsk_` key in the legacy `GROK_API_KEY` field; DeployMind detects it as Groq.
+   - Set `GROK_API_KEY` or `XAI_API_KEY` only for an xAI key.
+   - Restart the backend after changing `.env`. The Settings page displays whether answers use an LLM plus RAG or the grounded heuristic fallback.
+
 ## Supported Repository Types
 
 | Framework / Environment | Support Level | Features |
@@ -48,7 +54,8 @@ GitHub Repo -> Analysis -> RAG Q&A -> AI Testing -> Docker Build -> Kubernetes D
 | Python (FastAPI/Flask/Django) | Excellent | Analysis, RAG, AI Tests, Auto-Deploy |
 | Node.js (Express) | Good | Analysis, RAG, Auto-Deploy |
 | Java (Spring Boot) | Good | Analysis, RAG, Auto-Deploy |
-| Generic Dockerfile | Standard | Auto-Deploy |
+| React / static frontend | Good | Analysis, RAG, containerized static deployment |
+| Generic Dockerfile | Standard | Auto-Deploy with deployment-contract validation |
 
 ## Project Structure
 

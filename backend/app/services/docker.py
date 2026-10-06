@@ -2,9 +2,12 @@ import logging
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
+from collections.abc import Callable
 
 from app.core.config import settings
+from app.services.deployment_control import DeploymentCancelled
 
 logger = logging.getLogger("deploymind")
 
@@ -23,6 +26,10 @@ _BUILDKIT_REQUIRED_PATTERNS = re.compile(
 )
 _PREBUILT_JAVA_ARTIFACT_PATTERN = re.compile(
     r"\b(?:COPY|ADD)\s+(?:--\S+\s+)*(?:target/|build/libs/)",
+    re.IGNORECASE,
+)
+_LEGACY_POETRY_PATTERN = re.compile(
+    r"pip\s+install\s+poetry(?:==1\.[0-7](?:\.|\b))?|poetry\s+install\s+--no-dev",
     re.IGNORECASE,
 )
 
@@ -49,6 +56,17 @@ def requires_prebuilt_java_artifact(path: Path) -> bool:
         return False
 
 
+def requires_staging_dockerfile_replacement(path: Path) -> bool:
+    """Detect known non-reproducible source-build Dockerfile patterns."""
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        return bool(_LEGACY_POETRY_PATTERN.search(text))
+    except OSError:
+        return False
+
+
 def run_cmd(args: list[str], cwd: str | Path | None = None, timeout: int = 600) -> subprocess.CompletedProcess[str]:
     logger.info("running: %s", " ".join(args))
     env = os.environ.copy()
@@ -64,7 +82,13 @@ def run_cmd(args: list[str], cwd: str | Path | None = None, timeout: int = 600) 
     )
 
 
-def build_image(context_dir: Path, dockerfile: Path, image: str, timeout: int | None = None) -> str:
+def build_image(
+    context_dir: Path,
+    dockerfile: Path,
+    image: str,
+    timeout: int | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> str:
     effective_timeout = timeout if timeout is not None else settings.docker_build_timeout
 
     if not context_dir.is_dir():
@@ -80,19 +104,27 @@ def build_image(context_dir: Path, dockerfile: Path, image: str, timeout: int | 
         effective_timeout,
     )
 
+    args = ["docker", "build", "-t", image, "-f", str(dockerfile), str(context_dir)]
     try:
-        proc = run_cmd(
-            [
-                "docker",
-                "build",
-                "-t",
-                image,
-                "-f",
-                str(dockerfile),
-                str(context_dir),
-            ],
-            timeout=effective_timeout,
-        )
+        env = os.environ.copy()
+        env["DOCKER_BUILDKIT"] = "1"
+        env["BUILDKIT_PROGRESS"] = "plain"
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        deadline = time.monotonic() + effective_timeout
+        while process.poll() is None:
+            if cancel_check and cancel_check():
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                raise DeploymentCancelled("Staging deployment canceled while building the container image.")
+            if time.monotonic() >= deadline:
+                process.kill()
+                raise subprocess.TimeoutExpired(args, effective_timeout)
+            time.sleep(0.5)
+        stdout, stderr = process.communicate()
+        proc = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
     except FileNotFoundError as exc:
         msg = "Docker CLI not found. Install Docker Desktop and ensure 'docker' is in PATH."
         logger.error(msg)

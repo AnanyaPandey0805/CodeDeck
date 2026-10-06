@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import {
-  approveProduction, askRepositoryQuestion, createProject,
+  approveProduction, askRepositoryQuestion, cancelStaging, createProject,
   deployProduction, deployStaging, getAnalysis, getEvaluation,
   getFiles, getHealth, getPipeline, getProject, getSystemStatus,
   listDeployments, listProjects, rollbackProduction, runAiTests,
@@ -39,6 +39,18 @@ function stepIcon(s: string) {
   if (s === 'running') return '●'
   if (s === 'warning') return '⚠'
   return '○'
+}
+
+function friendlyError(message: string) {
+  const normalized = message.replace(/\s+/g, ' ').trim()
+  const lower = normalized.toLowerCase()
+  if (lower.includes('docker build failed')) return 'The container could not be built. Review the deployment analysis for the dependency or build configuration that needs attention.'
+  if (lower.includes('cluster not reachable') || lower.includes('kind create cluster')) return 'The local Kubernetes cluster is unavailable. Start the kind cluster, then retry staging.'
+  if (lower.includes('crashloopbackoff')) return 'The application container starts but exits repeatedly. Review the deployment analysis for its detected entrypoint or configuration issue.'
+  if (lower.includes('progress deadline') || lower.includes('rollout failed')) return 'Kubernetes did not report the service as ready in time. Review the deployment analysis for readiness, database, or startup configuration fixes.'
+  if (lower.includes('module not found') || lower.includes('no module named')) return 'A required runtime dependency or application module is missing. Review the deployment analysis for the suggested project fix.'
+  if (lower.includes('timed out')) return 'The operation took longer than expected. Check the deployment analysis and retry after the affected service is available.'
+  return normalized.split(/(?<=[.!?])\s+/)[0].slice(0, 240) || 'The operation could not be completed. Review the deployment analysis and try again.'
 }
 
 // ─── sub-components ─────────────────────────────────────────────────────────
@@ -96,6 +108,7 @@ export default function App() {
   const [apiOk, setApiOk] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
   const [deploying, setDeploying] = useState(false)
+  const [cancelingStaging, setCancelingStaging] = useState(false)
   const [deployingProd, setDeployingProd] = useState(false)
   const [approvingProd, setApprovingProd] = useState(false)
   const [rollingBack, setRollingBack] = useState(false)
@@ -118,7 +131,7 @@ export default function App() {
   // Poll while busy
   useEffect(() => {
     if (!selected) return
-    const isBusy = selected.status === 'deploying' || selected.status === 'deploying_green' || selected.status === 'analyzing'
+    const isBusy = selected.status === 'deploying' || selected.status === 'staging_cancel_requested' || selected.status === 'deploying_green' || selected.status === 'analyzing'
     if (!isBusy) return
     const iv = setInterval(() => loadProject(selected).catch(() => undefined), 3000)
     return () => clearInterval(iv)
@@ -252,6 +265,26 @@ export default function App() {
     }
   }
 
+  async function onCancelStaging() {
+    if (!selected) return
+    setCancelingStaging(true)
+    setError(null)
+    try {
+      const result = await cancelStaging(selected.id)
+      log('Docker/K8s', result.message)
+      const [steps, fresh] = await Promise.all([getPipeline(selected.id), getProject(selected.id)])
+      setPipeline(steps)
+      setSelected(fresh)
+      setProjects(prev => prev.map(p => p.id === fresh.id ? fresh : p))
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to cancel staging'
+      setError(msg)
+      log('Docker/K8s', `Cancellation error: ${msg}`)
+    } finally {
+      setCancelingStaging(false)
+    }
+  }
+
   async function onRefreshEval() {
     if (!selected) return
     setLoadingEval(true)
@@ -320,6 +353,24 @@ export default function App() {
   const latestDeployment = deployments[0]
   const smokeResult = (latestDeployment?.details as { smoke?: Record<string, unknown> } | null)?.smoke
   const failureAnalysis = (latestDeployment?.details as { failure_analysis?: Record<string, unknown> } | null)?.failure_analysis
+  const stagingStep = pipelineMap['Staging']
+  const stagingPhase = stagingStep?.result ?? 'Queued for staging deployment'
+  const stagingProgressMap: Record<string, number> = {
+    'Checking Kubernetes cluster': 8,
+    'Preparing repository source': 18,
+    'Building container image': 38,
+    'Loading image into kind': 58,
+    'Starting staging database': 70,
+    'Starting staging services': 70,
+    'Waiting for staging redis': 76,
+    'Waiting for staging kafka': 78,
+    'Applying Kubernetes manifests': 80,
+    'Waiting for application rollout': 90,
+    'Running staging smoke tests': 96,
+    'Staging deployment healthy': 100,
+  }
+  const stagingProgress = stagingStep?.status === 'completed' ? 100 : stagingProgressMap[stagingPhase] ?? 4
+  const stagingIsActive = selected?.status === 'deploying' || selected?.status === 'staging_cancel_requested' || stagingStep?.status === 'running'
 
   // ── sidebar ─────────────────────────────────────────────────────────────
   const NAV: { id: Page; label: string; icon: string }[] = [
@@ -431,7 +482,7 @@ export default function App() {
         <main className="flex-1 overflow-y-auto p-6">
           {error && (
             <div className="mb-4 rounded border border-red-700/50 bg-red-950/40 px-4 py-3 text-sm text-red-300">
-              <span className="font-semibold">Error: </span>{error}
+              <span className="font-semibold">Action needed: </span>{friendlyError(error)}
               <button onClick={() => setError(null)} className="ml-3 text-red-500 hover:text-red-300">✕</button>
             </div>
           )}
@@ -498,7 +549,7 @@ export default function App() {
                               <span className={`ml-2 shrink-0 rounded border px-1.5 py-0.5 text-[10px] ${statusBg(s)}`}>{s}</span>
                             </div>
                             {step?.result && <div className="mt-0.5 truncate text-zinc-500">{step.result}</div>}
-                            {step?.error && <div className="mt-0.5 truncate text-red-400">{step.error}</div>}
+                            {step?.error && <div className="mt-0.5 truncate text-red-400">{friendlyError(step.error)}</div>}
                           </div>
                         </div>
                       )
@@ -969,7 +1020,7 @@ export default function App() {
                             <span className={`rounded border px-1.5 py-0.5 text-[10px] ${statusBg(s)}`}>{s}</span>
                           </div>
                           {step?.result && <div className="mt-0.5 text-zinc-500">{step.result}</div>}
-                          {step?.error && <div className="mt-0.5 text-red-400">{step.error}</div>}
+                          {step?.error && <div className="mt-0.5 text-red-400">{friendlyError(step.error)}</div>}
                         </div>
                       </div>
                     )
@@ -1074,11 +1125,20 @@ export default function App() {
                   <div className="flex flex-wrap gap-3 items-center">
                     <button
                       onClick={onDeployStaging}
-                      disabled={deploying || busy || files.length === 0}
+                      disabled={deploying || cancelingStaging || busy || files.length === 0 || selected.status === 'deploying' || selected.status === 'staging_cancel_requested'}
                       className="rounded bg-sky-700 px-4 py-2 text-xs font-medium text-white hover:bg-sky-600 disabled:opacity-50 transition-colors"
                     >
                       {deploying ? 'Deploying Staging…' : 'Deploy Staging'}
                     </button>
+                    {stagingIsActive && (
+                      <button
+                        onClick={onCancelStaging}
+                        disabled={cancelingStaging || selected.status === 'staging_cancel_requested'}
+                        className="rounded border border-red-700/70 bg-red-950/30 px-4 py-2 text-xs font-medium text-red-300 hover:bg-red-900/40 disabled:opacity-50 transition-colors"
+                      >
+                        {cancelingStaging || selected.status === 'staging_cancel_requested' ? 'Canceling Staging…' : 'Cancel Staging'}
+                      </button>
+                    )}
                     {selected.status === 'staging_healthy' && (
                       <button
                         onClick={() => { setDeployingProd(true); deployProduction(selected.id).finally(() => { setDeployingProd(false); loadProject(selected) }) }}
@@ -1100,6 +1160,19 @@ export default function App() {
                       </a>
                     )}
                   </div>
+
+                  {stagingIsActive && (
+                    <div className="rounded border border-sky-800/50 bg-sky-950/20 p-4 text-xs">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <span className="font-medium text-sky-200">{selected.status === 'staging_cancel_requested' ? 'Canceling staging deployment' : 'Staging deployment in progress'}</span>
+                        <span className="font-mono text-sky-400">{stagingProgress}%</span>
+                      </div>
+                      <div className="h-1.5 overflow-hidden rounded bg-zinc-800">
+                        <div className="h-full rounded bg-sky-500 transition-all duration-500" style={{ width: `${stagingProgress}%` }} />
+                      </div>
+                      <p className="mt-2 text-[11px] text-sky-300/80">{selected.status === 'staging_cancel_requested' ? 'Waiting for the current safe deployment operation to stop and clean up resources.' : stagingPhase}</p>
+                    </div>
+                  )}
 
                   {/* Approval banner */}
                   {selected.status === 'production_awaiting_approval' && (
@@ -1310,11 +1383,17 @@ export default function App() {
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">Answer Mode</span>
+                  <span className={systemStatus?.ai_provider?.status === 'configured' ? 'font-mono text-emerald-400' : 'font-mono text-amber-400'}>
+                    {systemStatus?.ai_provider?.status === 'configured' ? 'LLM + grounded RAG' : 'Grounded heuristic fallback'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
                   <span className="text-zinc-400">RAG Vector Index</span>
                   <span className="font-mono text-zinc-400">192-dim Normalized Cosine Retrieval</span>
                 </div>
                 <div className="pt-2 border-t border-zinc-800/80 text-zinc-500 leading-relaxed text-[11px]">
-                  DeployMind supports dual-provider LLM fallback: it prioritizes <strong className="text-zinc-300">OpenAI</strong> (gpt-4.1-mini) and seamlessly falls back to <strong className="text-zinc-300">xAI Grok</strong> (grok-2-latest) via <code className="text-sky-300 font-mono">GROK_API_KEY</code> if OpenAI is unavailable or rate-limited. Offline grounded heuristics remain available if neither key is configured.
+                  {systemStatus?.ai_provider?.message ?? 'DeployMind prioritizes OpenAI, then Groq or xAI depending on the configured key. Every answer remains grounded in retrieved repository files; heuristics are used only when no provider is configured or all providers are unavailable.'}
                 </div>
               </div>
 

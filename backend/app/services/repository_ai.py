@@ -372,13 +372,19 @@ def search_repository(project_id: int, query: str, limit: int = 4) -> list[Searc
 def get_active_ai_provider() -> dict[str, str]:
     openai_key = (settings.openai_api_key or "").strip()
     if openai_key and not openai_key.startswith("sk-abcdef") and not openai_key.startswith("sk-dummy"):
-        return {"provider": "OpenAI", "model": getattr(settings, "openai_model", "gpt-4.1-mini"), "status": "active"}
+        return {"provider": "OpenAI", "model": getattr(settings, "openai_model", "gpt-4.1-mini"), "status": "configured"}
 
     grok_key = (getattr(settings, "grok_api_key", "") or getattr(settings, "xai_api_key", "") or "").strip()
+    if grok_key.startswith("gsk_"):
+        return {"provider": "Groq", "model": getattr(settings, "groq_model", "llama-3.3-70b-versatile"), "status": "configured"}
     if grok_key and not grok_key.startswith("xai-dummy"):
-        return {"provider": "xAI Grok", "model": getattr(settings, "grok_model", "grok-2-latest"), "status": "active"}
+        return {"provider": "xAI Grok", "model": getattr(settings, "grok_model", "grok-2-latest"), "status": "configured"}
 
-    return {"provider": "Grounded Heuristic", "model": "rule-based-engine", "status": "offline_fallback"}
+    groq_key = (getattr(settings, "groq_api_key", "") or "").strip()
+    if groq_key:
+        return {"provider": "Groq", "model": getattr(settings, "groq_model", "llama-3.3-70b-versatile"), "status": "configured"}
+
+    return {"provider": "Grounded Heuristic", "model": "rule-based-engine", "status": "offline_fallback", "message": "No usable LLM API key is configured."}
 
 
 def _safe_chat_with_provider(
@@ -405,8 +411,31 @@ def _safe_chat_with_provider(
         except Exception as e:
             logger.warning("OpenAI completion failed (%s), attempting secondary provider fallback", e)
 
-    # 2. Try xAI Grok if key is configured (or if OpenAI failed)
+    # 2. A gsk_ key is a Groq OpenAI-compatible key, not an xAI key.
     grok_key = (getattr(settings, "grok_api_key", "") or getattr(settings, "xai_api_key", "") or "").strip()
+    groq_key = (getattr(settings, "groq_api_key", "") or "").strip()
+    if grok_key.startswith("gsk_"):
+        groq_key, grok_key = grok_key, ""
+
+    if OpenAI and groq_key and not groq_key.startswith("gsk-dummy"):
+        try:
+            model = getattr(settings, "groq_model", "llama-3.3-70b-versatile")
+            client = OpenAI(api_key=groq_key, base_url=getattr(settings, "groq_base_url", "https://api.groq.com/openai/v1"))
+            res = client.chat.completions.create(
+                model=model,
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            text = res.choices[0].message.content if res.choices else None
+            if isinstance(text, str) and text.strip():
+                return text.strip(), f"Groq ({model})"
+        except Exception as e:
+            logger.warning("Groq completion failed (%s)", e)
+
+    # 3. Try xAI Grok if key is configured (or if OpenAI failed)
     if OpenAI and grok_key and not grok_key.startswith("xai-dummy"):
         try:
             base_url = getattr(settings, "grok_base_url", "https://api.x.ai/v1")

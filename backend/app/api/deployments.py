@@ -21,6 +21,7 @@ from app.services import kubernetes as k8s_svc
 from app.services.pipeline import upsert_step
 from app.services.repository_ai import analyze_deployment_failure
 from app.services.deployment_contract import build_deployment_contract
+from app.services.deployment_control import DeploymentCancelled
 
 router = APIRouter(prefix="/api/projects", tags=["deployments"])
 logger = logging.getLogger("deploymind")
@@ -38,6 +39,46 @@ def _fail(step: str, message: str, details: str | None = None, status_code: int 
         status_code=status_code,
         content={"status": "failed", "step": step, "message": message, "details": details},
     )
+
+
+def _report_staging_progress(project_id: int, message: str) -> None:
+    """Persist background deployment phases for the polling frontend."""
+    db = SessionLocal()
+    try:
+        upsert_step(db, project_id, "Staging", "running", result=message)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("Could not persist staging progress", exc_info=True)
+    finally:
+        db.close()
+
+
+def _staging_cancel_requested(project_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        project = db.get(Project, project_id)
+        return bool(project and project.status == "staging_cancel_requested")
+    finally:
+        db.close()
+
+
+def _cleanup_canceled_staging(app_name: str) -> None:
+    for kind, name in (
+        ("deployment", f"{app_name}-staging"),
+        ("deployment", f"{app_name}-db"),
+        ("service", app_name),
+        ("service", f"{app_name}-nodeport"),
+        ("service", f"{app_name}-db"),
+        ("deployment", f"{app_name}-redis"),
+        ("service", f"{app_name}-redis"),
+        ("deployment", f"{app_name}-kafka"),
+        ("service", f"{app_name}-kafka"),
+    ):
+        try:
+            k8s_svc._run(["kubectl", "delete", kind, name, "-n", settings.k8s_namespace, "--ignore-not-found=true"], timeout=30)
+        except Exception:
+            logger.warning("Could not clean up canceled staging resource %s/%s", kind, name, exc_info=True)
 
 
 def _bg_deploy_staging(project_id: int):
@@ -62,6 +103,8 @@ def _bg_deploy_staging(project_id: int):
             analysis=analysis.analysis_result or {} if analysis else {},
             dockerfile=dockerfile,
             k8s_files=k8s_files,
+            progress=lambda message: _report_staging_progress(project_id, message),
+            cancel_check=lambda: _staging_cancel_requested(project_id),
         )
 
         row = Deployment(
@@ -76,6 +119,24 @@ def _bg_deploy_staging(project_id: int):
         project.status = "staging_healthy"
         upsert_step(db, project_id, "Staging", "completed", result=result.message)
         db.commit()
+    except DeploymentCancelled as exc:
+        logger.info("staging deployment canceled for project %s", project_id)
+        project = db.get(Project, project_id)
+        if project:
+            _cleanup_canceled_staging(sanitize_name(project.repository_name or "app"))
+            project.status = "ready"
+            upsert_step(db, project_id, "Staging", "warning", result="Staging deployment canceled")
+            db.add(
+                Deployment(
+                    project_id=project_id,
+                    environment="staging",
+                    version="blue",
+                    status="canceled",
+                    deployment_type="staging",
+                    details={"message": str(exc)},
+                )
+            )
+            db.commit()
     except Exception as exc:
         logger.exception("staging background deploy failed")
         msg = str(exc)
@@ -191,6 +252,17 @@ def deploy_staging(project_id: int, background_tasks: BackgroundTasks, db: Sessi
 
     background_tasks.add_task(_bg_deploy_staging, project_id)
     return {"status": "deploying", "message": "Staging deployment started in background"}
+
+
+@router.post("/{project_id}/deploy/staging/cancel")
+def cancel_staging(project_id: int, db: Session = Depends(get_db)):
+    project = _get_project(project_id, db)
+    if project.status not in {"deploying", "staging_cancel_requested"}:
+        return _fail("staging_cancel", "There is no active staging deployment to cancel")
+    project.status = "staging_cancel_requested"
+    upsert_step(db, project_id, "Staging", "warning", result="Cancellation requested")
+    db.commit()
+    return {"status": "cancel_requested", "message": "Cancellation requested. The active build or rollout will stop shortly."}
 
 
 @router.post("/{project_id}/deploy/production", status_code=202)

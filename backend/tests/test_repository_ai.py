@@ -165,6 +165,7 @@ def test_get_active_ai_provider_selection(monkeypatch):
     monkeypatch.setattr(settings, "openai_api_key", "")
     monkeypatch.setattr(settings, "grok_api_key", "")
     monkeypatch.setattr(settings, "xai_api_key", "")
+    monkeypatch.setattr(settings, "groq_api_key", "")
     p1 = get_active_ai_provider()
     assert p1["provider"] == "Grounded Heuristic"
 
@@ -173,9 +174,13 @@ def test_get_active_ai_provider_selection(monkeypatch):
     assert p2["provider"] == "xAI Grok"
     assert "grok" in p2["model"].lower()
 
-    monkeypatch.setattr(settings, "openai_api_key", "sk-live-test-key-999")
+    monkeypatch.setattr(settings, "grok_api_key", "gsk_test_key_12345")
     p3 = get_active_ai_provider()
-    assert p3["provider"] == "OpenAI"
+    assert p3["provider"] == "Groq"
+
+    monkeypatch.setattr(settings, "openai_api_key", "sk-live-test-key-999")
+    p4 = get_active_ai_provider()
+    assert p4["provider"] == "OpenAI"
 
 
 def test_failure_explanation_categories():

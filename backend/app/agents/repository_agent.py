@@ -89,11 +89,24 @@ def _find_python_entrypoint(root: Path, framework_name: str) -> str | None:
 
 def _detect_database(blob: str) -> str | None:
     blob = blob.lower()
+    if "postgis" in blob or "hibernate-spatial" in blob:
+        return "postgis"
     if any(marker in blob for marker in ("postgresql", "postgres", "psycopg", "asyncpg")):
         return "postgresql"
     if any(marker in blob for marker in ("mysql", "mariadb", "pymysql", "mysqlclient")):
         return "mysql"
     return None
+
+
+def _detect_staging_dependencies(blob: str) -> list[str]:
+    """Detect local infrastructure an application requires at startup."""
+    blob = blob.lower()
+    dependencies: list[str] = []
+    if any(marker in blob for marker in ("redis", "spring.data.redis", "redis_host")):
+        dependencies.append("redis")
+    if any(marker in blob for marker in ("kafka", "spring.kafka", "kafka_bootstrap_servers")):
+        dependencies.append("kafka")
+    return dependencies
 
 
 class RepositoryAnalysis(BaseModel):
@@ -114,6 +127,7 @@ class RepositoryAnalysis(BaseModel):
     detected_services: list[str] = Field(default_factory=list)
     multiservice_notice: str | None = None
     database: str | None = None
+    staging_dependencies: list[str] = Field(default_factory=list)
 
 
 def _read_text(path: Path, limit: int = 200_000) -> str:
@@ -198,6 +212,7 @@ def _detect_python(root: Path, names: set[str]) -> RepositoryAnalysis | None:
         port=port,
         top_level_files=sorted(names)[:40],
         database=_detect_database(blob),
+        staging_dependencies=_detect_staging_dependencies(blob),
     )
 
 
@@ -308,6 +323,7 @@ def _detect_java(root: Path, names: set[str]) -> RepositoryAnalysis | None:
         port=8080,
         top_level_files=sorted(names)[:40],
         database=_detect_database(blob),
+        staging_dependencies=_detect_staging_dependencies(blob),
     )
 
 
