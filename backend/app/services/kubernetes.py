@@ -118,13 +118,16 @@ def wait_rollout(
     namespace: str,
     timeout_s: int = 300,
     cancel_check: Callable[[], bool] | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> str:
     """Wait for rollout to complete, aborting early if pods crash-loop."""
     import time
 
     TERMINAL_STATES = {"CrashLoopBackOff", "Error", "OOMKilled", "ImagePullBackOff", "ErrImagePull", "InvalidImageName"}
     deadline = time.time() + timeout_s
-    poll_interval = 15
+    poll_interval = 3
+    started_at = time.monotonic()
+    last_progress_at = 0.0
 
     while time.time() < deadline:
         if cancel_check and cancel_check():
@@ -164,12 +167,22 @@ def wait_rollout(
 
         remaining = int(deadline - time.time())
         logger.info("waiting for rollout of %s (%ds remaining)...", deployment, remaining)
-        time.sleep(poll_interval)
+        elapsed = time.monotonic() - started_at
+        if progress_callback and elapsed - last_progress_at >= 10:
+            progress_callback(f"{deployment} is still starting ({int(elapsed)}s elapsed)")
+            last_progress_at = elapsed
+        # Keep cancellation responsive while waiting for the next rollout poll.
+        for _ in range(poll_interval):
+            if cancel_check and cancel_check():
+                raise DeploymentCancelled("Staging deployment canceled while waiting for Kubernetes rollout.")
+            time.sleep(1)
 
-    # Final check after timeout
+    # Do not start another full-length rollout wait here. The polling deadline
+    # has already elapsed, and a second timeout-sized kubectl call made
+    # cancellation appear hung for several more minutes.
     proc = _run(
-        ["kubectl", "rollout", "status", f"deployment/{deployment}", "-n", namespace, f"--timeout={timeout_s}s"],
-        timeout=timeout_s + 30,
+        ["kubectl", "rollout", "status", f"deployment/{deployment}", "-n", namespace, "--timeout=1s"],
+        timeout=5,
     )
     out = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode != 0:
@@ -316,7 +329,14 @@ class PortForwardManager:
 
 port_forward_manager = PortForwardManager()
 
-def smoke_test(service: str, namespace: str, paths: list[str] | None = None, timeout_s: int = 60) -> dict:
+def smoke_test(
+    service: str,
+    namespace: str,
+    paths: list[str] | None = None,
+    timeout_s: int = 60,
+    cancel_check: Callable[[], bool] | None = None,
+    progress_callback: Callable[[str], None] | None = None,
+) -> dict:
     paths = paths or ["/docs", "/health", "/api/v1/utils/health-check", "/api/v1", "/", "/openapi.json"]
     local_port = _free_port()
     svc_port = get_service_port(service, namespace)
@@ -332,16 +352,27 @@ def smoke_test(service: str, namespace: str, paths: list[str] | None = None, tim
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env={**os.environ, **({"KUBECONFIG": settings.kubeconfig} if settings.kubeconfig else {})},
+        start_new_session=(os.name != "nt"),
     )
     try:
         deadline = time.time() + timeout_s
+        started_at = time.monotonic()
+        last_progress_at = 0.0
         last_error = "smoke test did not succeed"
         while time.time() < deadline:
+            if cancel_check and cancel_check():
+                raise DeploymentCancelled("Staging deployment canceled while running smoke tests.")
             if pf.poll() is not None:
                 err = pf.stderr.read() if pf.stderr else ""
                 raise RuntimeError(f"port-forward exited early: {err}")
             time.sleep(1.5)
+            elapsed = time.monotonic() - started_at
+            if progress_callback and elapsed - last_progress_at >= 10:
+                progress_callback(f"Still checking the staging endpoint ({int(elapsed)}s elapsed)")
+                last_progress_at = elapsed
             for path in paths:
                 url = f"http://127.0.0.1:{local_port}{path}"
                 try:
@@ -359,11 +390,24 @@ def smoke_test(service: str, namespace: str, paths: list[str] | None = None, tim
                     last_error = str(exc)
         raise RuntimeError(last_error)
     finally:
-        pf.terminate()
-        try:
-            pf.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pf.kill()
+        if pf.poll() is None:
+            if os.name != "nt":
+                try:
+                    os.killpg(pf.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            else:
+                pf.terminate()
+            try:
+                pf.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                if os.name != "nt":
+                    try:
+                        os.killpg(pf.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    pf.kill()
 
 
 def patch_manifests_for_local(

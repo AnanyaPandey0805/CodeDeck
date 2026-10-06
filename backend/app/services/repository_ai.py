@@ -392,6 +392,13 @@ def _safe_chat_with_provider(
     system_prompt: str = "You are a grounded repository assistant. Answer only from provided evidence.",
 ) -> tuple[str | None, str]:
     """Attempts completion with OpenAI first, falls back to xAI Grok, or returns None and 'heuristic'."""
+    last_failure: str | None = None
+
+    def failure_label(provider: str, error: Exception) -> str:
+        status_code = getattr(error, "status_code", None)
+        detail = f"HTTP {status_code}" if status_code else type(error).__name__
+        return f"{provider} request failed ({detail})"
+
     # 1. Try OpenAI if key is configured and not placeholder
     openai_key = (settings.openai_api_key or "").strip()
     if OpenAI and openai_key and not openai_key.startswith("sk-abcdef") and not openai_key.startswith("sk-dummy"):
@@ -409,6 +416,7 @@ def _safe_chat_with_provider(
             if isinstance(text, str) and text.strip():
                 return text.strip(), "OpenAI (gpt-4.1-mini)"
         except Exception as e:
+            last_failure = failure_label("OpenAI", e)
             logger.warning("OpenAI completion failed (%s), attempting secondary provider fallback", e)
 
     # 2. A gsk_ key is a Groq OpenAI-compatible key, not an xAI key.
@@ -433,6 +441,7 @@ def _safe_chat_with_provider(
             if isinstance(text, str) and text.strip():
                 return text.strip(), f"Groq ({model})"
         except Exception as e:
+            last_failure = failure_label("Groq", e)
             logger.warning("Groq completion failed (%s)", e)
 
     # 3. Try xAI Grok if key is configured (or if OpenAI failed)
@@ -453,9 +462,12 @@ def _safe_chat_with_provider(
             if isinstance(text, str) and text.strip():
                 return text.strip(), f"xAI Grok ({model})"
         except Exception as e:
+            last_failure = failure_label("xAI Grok", e)
             logger.warning("xAI Grok completion failed (%s)", e)
 
-    return None, "Grounded Heuristic Fallback"
+    if last_failure:
+        return None, f"Grounded Heuristic Fallback — {last_failure}"
+    return None, "Grounded Heuristic Fallback (no provider configured)"
 
 
 def _safe_chat(
@@ -587,7 +599,10 @@ def answer_repository_question(project_id: int, question: str, analysis: dict) -
     answer_text, provider = _safe_chat_with_provider(prompt)
     if not answer_text:
         answer_text = _heuristic_answer(question, analysis, signals, sources)
-        provider = "Heuristic Analysis"
+        # Distinguish a request-time outage from an unconfigured provider. The
+        # system settings show configured keys; this label shows what answered
+        # this specific request and why it fell back.
+        provider = provider.replace("Grounded Heuristic Fallback", "Heuristic Analysis")
     return RepositoryAnswer(question=question, answer=answer_text, sources=sources, provider=provider)
 
 
@@ -1018,6 +1033,10 @@ def explain_failure(error: str, evidence: list[str] | None = None, command: str 
         "failure": error,
         "likely_cause": summary,
         "evidence": evidence,
+        # Keep the original staging error visible to the UI. The categorized
+        # diagnosis is useful context, but must not hide the build output that
+        # identifies the failing dependency or Dockerfile instruction.
+        "details": error,
         "suggested_fix": fix,
         "category": category,
         "repository_status": repository_status,

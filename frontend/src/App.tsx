@@ -367,9 +367,22 @@ export default function App() {
     'Applying Kubernetes manifests': 80,
     'Waiting for application rollout': 90,
     'Running staging smoke tests': 96,
+    'Cleaning up staging resources': 8,
     'Staging deployment healthy': 100,
   }
-  const stagingProgress = stagingStep?.status === 'completed' ? 100 : stagingProgressMap[stagingPhase] ?? 4
+  const dynamicStagingProgress = [
+    ['Building container image:', 'Building container image'],
+    ['Waiting for staging database:', 'Starting staging database'],
+    ['Waiting for staging redis:', 'Waiting for staging redis'],
+    ['Waiting for staging kafka:', 'Waiting for staging kafka'],
+    ['Waiting for application rollout:', 'Waiting for application rollout'],
+    ['Running staging smoke tests:', 'Running staging smoke tests'],
+  ].find(([prefix]) => stagingPhase.startsWith(prefix))
+  const stagingProgress = stagingStep?.status === 'completed'
+    ? 100
+    : dynamicStagingProgress
+      ? stagingProgressMap[dynamicStagingProgress[1]]
+      : stagingProgressMap[stagingPhase] ?? 4
   const stagingIsActive = selected?.status === 'deploying' || selected?.status === 'staging_cancel_requested' || stagingStep?.status === 'running'
 
   // ── sidebar ─────────────────────────────────────────────────────────────
@@ -1170,7 +1183,7 @@ export default function App() {
                       <div className="h-1.5 overflow-hidden rounded bg-zinc-800">
                         <div className="h-full rounded bg-sky-500 transition-all duration-500" style={{ width: `${stagingProgress}%` }} />
                       </div>
-                      <p className="mt-2 text-[11px] text-sky-300/80">{selected.status === 'staging_cancel_requested' ? 'Waiting for the current safe deployment operation to stop and clean up resources.' : stagingPhase}</p>
+                      <p className="mt-2 text-[11px] text-sky-300/80">{selected.status === 'staging_cancel_requested' && stagingPhase === 'Cleaning up staging resources' ? stagingPhase : selected.status === 'staging_cancel_requested' ? 'Stopping the active staging operation…' : stagingPhase}</p>
                     </div>
                   )}
 
@@ -1286,6 +1299,12 @@ export default function App() {
                       <p className="text-orange-200">{String(failureAnalysis.likely_cause ?? 'No analysis')}</p>
                       {Boolean(failureAnalysis.suggested_fix) && (
                         <p className="mt-2 text-orange-300/70">→ {String(failureAnalysis.suggested_fix)}</p>
+                      )}
+                      {Boolean(failureAnalysis.details) && (
+                        <details className="mt-3 rounded border border-zinc-800 bg-zinc-950/70 p-2">
+                          <summary className="cursor-pointer text-zinc-400">Show staging error details</summary>
+                          <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-zinc-400">{String(failureAnalysis.details)}</pre>
+                        </details>
                       )}
                     </div>
                   )}

@@ -523,9 +523,16 @@ def deploy_staging(
             )
 
         report("Building container image")
-        docker_svc.build_image(context_dir, dockerfile_path, image, timeout=1800, cancel_check=cancel_check)
+        docker_svc.build_image(
+            context_dir,
+            dockerfile_path,
+            image,
+            timeout=1800,
+            cancel_check=cancel_check,
+            progress_callback=lambda line: report(f"Building container image: {line}"),
+        )
         report("Loading image into kind")
-        docker_svc.kind_load_image(image, cluster=cluster)
+        docker_svc.kind_load_image(image, cluster=cluster, cancel_check=cancel_check)
 
         local_files = {
             k: v
@@ -582,17 +589,40 @@ def deploy_staging(
             report("Starting staging services")
             k8s_svc.apply_manifests(support_files, namespace=namespace)
             if database:
-                k8s_svc.wait_rollout(f"{app_name}-db", namespace=namespace, timeout_s=240, cancel_check=cancel_check)
+                k8s_svc.wait_rollout(
+                    f"{app_name}-db",
+                    namespace=namespace,
+                    timeout_s=240,
+                    cancel_check=cancel_check,
+                    progress_callback=lambda detail: report(f"Waiting for staging database: {detail}"),
+                )
             for dependency in staging_dependencies:
                 report(f"Waiting for staging {dependency}")
-                k8s_svc.wait_rollout(f"{app_name}-{dependency}", namespace=namespace, timeout_s=300, cancel_check=cancel_check)
+                k8s_svc.wait_rollout(
+                    f"{app_name}-{dependency}",
+                    namespace=namespace,
+                    timeout_s=300,
+                    cancel_check=cancel_check,
+                    progress_callback=lambda detail, dependency=dependency: report(f"Waiting for staging {dependency}: {detail}"),
+                )
         report("Applying Kubernetes manifests")
         k8s_svc.apply_manifests(app_files, namespace=namespace)
         report("Waiting for application rollout")
-        rollout = k8s_svc.wait_rollout(deploy_name, namespace=namespace, timeout_s=300, cancel_check=cancel_check)
+        rollout = k8s_svc.wait_rollout(
+            deploy_name,
+            namespace=namespace,
+            timeout_s=300,
+            cancel_check=cancel_check,
+            progress_callback=lambda detail: report(f"Waiting for application rollout: {detail}"),
+        )
         status = k8s_svc.get_deployment_status(deploy_name, namespace=namespace)
         report("Running staging smoke tests")
-        smoke = k8s_svc.smoke_test(app_name, namespace=namespace)
+        smoke = k8s_svc.smoke_test(
+            app_name,
+            namespace=namespace,
+            cancel_check=cancel_check,
+            progress_callback=lambda detail: report(f"Running staging smoke tests: {detail}"),
+        )
 
         if smoke.get("status") != "passed":
             raise RuntimeError(smoke.get("message") or "Smoke test failed")

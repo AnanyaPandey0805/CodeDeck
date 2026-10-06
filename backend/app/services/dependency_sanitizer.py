@@ -62,13 +62,32 @@ def _parse_requirement_version(line: str) -> tuple[str | None, tuple[int, ...] |
 
 
 def choose_python_base_image(repo_dir: Path, default_tag: str = "3.11-slim") -> str:
-    path = repo_dir / "requirements.txt"
-    if not path.is_file():
-        return f"python:{default_tag}"
+    # Old lockfiles can pin native extensions that predate Python 3.11 even
+    # when the project has no requirements.txt (for example Poetry projects
+    # pinning greenlet 1.x). Use the same compatibility rule for requirements
+    # and Poetry's package/version entries so generated staging images match
+    # the dependency set the repository actually locked.
+    requirements = repo_dir / "requirements.txt"
+    if requirements.is_file():
+        for line in requirements.read_text(encoding="utf-8", errors="ignore").splitlines():
+            name, version = _parse_requirement_version(line)
+            threshold = LEGACY_PYTHON_310_PACKAGES.get(name or "")
+            if threshold and version and version < threshold:
+                return "python:3.10-slim"
 
-    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        name, version = _parse_requirement_version(line)
-        threshold = LEGACY_PYTHON_310_PACKAGES.get(name or "")
-        if threshold and version and version < threshold:
-            return "python:3.10-slim"
+    poetry_lock = repo_dir / "poetry.lock"
+    if poetry_lock.is_file():
+        package_name: str | None = None
+        for line in poetry_lock.read_text(encoding="utf-8", errors="ignore").splitlines():
+            name_match = re.match(r'^name\s*=\s*"([A-Za-z0-9_.-]+)"\s*$', line)
+            if name_match:
+                package_name = name_match.group(1).lower().replace("_", "-")
+                continue
+            version_match = re.match(r'^version\s*=\s*"([0-9][0-9A-Za-z_.-]*)"\s*$', line)
+            if version_match and package_name:
+                version = _parse_requirement_version(f"{package_name}=={version_match.group(1)}")[1]
+                threshold = LEGACY_PYTHON_310_PACKAGES.get(package_name)
+                if threshold and version and version < threshold:
+                    return "python:3.10-slim"
+                package_name = None
     return f"python:{default_tag}"

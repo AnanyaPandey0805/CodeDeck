@@ -64,21 +64,23 @@ def _staging_cancel_requested(project_id: int) -> bool:
 
 
 def _cleanup_canceled_staging(app_name: str) -> None:
-    for kind, name in (
-        ("deployment", f"{app_name}-staging"),
-        ("deployment", f"{app_name}-db"),
-        ("service", app_name),
-        ("service", f"{app_name}-nodeport"),
-        ("service", f"{app_name}-db"),
-        ("deployment", f"{app_name}-redis"),
-        ("service", f"{app_name}-redis"),
-        ("deployment", f"{app_name}-kafka"),
-        ("service", f"{app_name}-kafka"),
-    ):
-        try:
-            k8s_svc._run(["kubectl", "delete", kind, name, "-n", settings.k8s_namespace, "--ignore-not-found=true"], timeout=30)
-        except Exception:
-            logger.warning("Could not clean up canceled staging resource %s/%s", kind, name, exc_info=True)
+    resources = [
+        *(f"deployment/{name}" for name in (f"{app_name}-staging", f"{app_name}-db", f"{app_name}-redis", f"{app_name}-kafka")),
+        *(f"service/{name}" for name in (app_name, f"{app_name}-nodeport", f"{app_name}-db", f"{app_name}-redis", f"{app_name}-kafka")),
+    ]
+    try:
+        proc = k8s_svc._run(
+            [
+                "kubectl", "delete", *resources,
+                "-n", settings.k8s_namespace,
+                "--ignore-not-found=true", "--wait=false", "--timeout=10s",
+            ],
+            timeout=15,
+        )
+        if proc.returncode != 0:
+            logger.warning("Could not clean up all canceled staging resources: %s", (proc.stderr or proc.stdout or "unknown error")[:1000])
+    except Exception:
+        logger.warning("Could not clean up canceled staging resources", exc_info=True)
 
 
 def _bg_deploy_staging(project_id: int):
@@ -123,6 +125,7 @@ def _bg_deploy_staging(project_id: int):
         logger.info("staging deployment canceled for project %s", project_id)
         project = db.get(Project, project_id)
         if project:
+            upsert_step(db, project_id, "Staging", "running", result="Cleaning up staging resources")
             _cleanup_canceled_staging(sanitize_name(project.repository_name or "app"))
             project.status = "ready"
             upsert_step(db, project_id, "Staging", "warning", result="Staging deployment canceled")
