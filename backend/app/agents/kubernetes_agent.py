@@ -20,6 +20,13 @@ def sanitize_name(name: str) -> str:
     return (name or "app")[:63]
 
 
+def staging_namespace(base_namespace: str, project_id: int, attempt_id: str) -> str:
+    """Return an isolated, DNS-safe namespace for one staging attempt."""
+    suffix = f"-p{project_id}-{attempt_id}"
+    prefix = sanitize_name(base_namespace)[: 63 - len(suffix)].rstrip("-")
+    return f"{prefix or 'staging'}{suffix}"
+
+
 def generate_database_manifest(app_name: str, database: str | None) -> str | None:
     """Create an isolated, ephemeral database for local staging only."""
     if database in {"postgresql", "postgis"}:

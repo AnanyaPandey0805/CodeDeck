@@ -6,7 +6,12 @@ from typing import Callable
 
 from pydantic import BaseModel, Field
 
-from app.agents.kubernetes_agent import generate_database_manifest, generate_dependency_manifest, sanitize_name
+from app.agents.kubernetes_agent import (
+    generate_database_manifest,
+    generate_dependency_manifest,
+    sanitize_name,
+    staging_namespace,
+)
 from app.core.config import settings
 from app.services import docker as docker_svc
 from app.services import kubernetes as k8s_svc
@@ -450,9 +455,10 @@ def deploy_staging(
     k8s_files: dict[str, str],
     progress: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    namespace: str | None = None,
 ) -> StagingDeployResult:
     app_name = sanitize_name(repository_name or analysis.get("repository_name") or "app")
-    namespace = settings.k8s_namespace
+    namespace = namespace or staging_namespace(settings.k8s_namespace, project_id, "legacy")
     cluster = settings.kind_cluster_name
     image = f"deploymind/{app_name}:staging"
     dest = Path(settings.workspace_dir) / f"project_{project_id}_deploy"
@@ -564,7 +570,7 @@ def deploy_staging(
         # Inject a NodePort service so the app is reachable from the host browser
         # without manual kubectl port-forward.
         port = int(analysis.get("port") or 8000)
-        node_port = _allocate_node_port(app_name)
+        node_port = _allocate_node_port(f"{app_name}-{namespace}")
         patched["nodeport-service.yaml"] = _nodeport_service_manifest(
             app_name, port, node_port, namespace
         )

@@ -1,5 +1,6 @@
 import logging
 import re
+from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
@@ -12,7 +13,7 @@ from app.agents.deployment_agent import (
     rollback as run_rollback,
     switch_traffic as run_switch_traffic,
 )
-from app.agents.kubernetes_agent import sanitize_name
+from app.agents.kubernetes_agent import sanitize_name, staging_namespace
 from app.api.schemas import DeploymentOut
 from app.core.config import settings
 from app.db.database import SessionLocal, get_db
@@ -63,7 +64,7 @@ def _staging_cancel_requested(project_id: int) -> bool:
         db.close()
 
 
-def _cleanup_canceled_staging(app_name: str) -> None:
+def _cleanup_canceled_staging(app_name: str, namespace: str) -> None:
     resources = [
         *(f"deployment/{name}" for name in (f"{app_name}-staging", f"{app_name}-db", f"{app_name}-redis", f"{app_name}-kafka")),
         *(f"service/{name}" for name in (app_name, f"{app_name}-nodeport", f"{app_name}-db", f"{app_name}-redis", f"{app_name}-kafka")),
@@ -72,7 +73,7 @@ def _cleanup_canceled_staging(app_name: str) -> None:
         proc = k8s_svc._run(
             [
                 "kubectl", "delete", *resources,
-                "-n", settings.k8s_namespace,
+                "-n", namespace,
                 "--ignore-not-found=true", "--wait=false", "--timeout=10s",
             ],
             timeout=15,
@@ -83,13 +84,14 @@ def _cleanup_canceled_staging(app_name: str) -> None:
         logger.warning("Could not clean up canceled staging resources", exc_info=True)
 
 
-def _bg_deploy_staging(project_id: int):
+def _bg_deploy_staging(project_id: int, namespace: str | None = None):
     db = SessionLocal()
     project = None
     try:
         project = db.get(Project, project_id)
         if not project:
             return
+        namespace = namespace or staging_namespace(settings.k8s_namespace, project_id, "legacy")
         analysis = db.query(Analysis).filter(Analysis.project_id == project_id).first()
         files = {
             f.filename: f.content
@@ -107,6 +109,7 @@ def _bg_deploy_staging(project_id: int):
             k8s_files=k8s_files,
             progress=lambda message: _report_staging_progress(project_id, message),
             cancel_check=lambda: _staging_cancel_requested(project_id),
+            namespace=namespace,
         )
 
         row = Deployment(
@@ -126,7 +129,7 @@ def _bg_deploy_staging(project_id: int):
         project = db.get(Project, project_id)
         if project:
             upsert_step(db, project_id, "Staging", "running", result="Cleaning up staging resources")
-            _cleanup_canceled_staging(sanitize_name(project.repository_name or "app"))
+            _cleanup_canceled_staging(sanitize_name(project.repository_name or "app"), namespace)
             project.status = "ready"
             upsert_step(db, project_id, "Staging", "warning", result="Staging deployment canceled")
             db.add(
@@ -136,7 +139,7 @@ def _bg_deploy_staging(project_id: int):
                     version="blue",
                     status="canceled",
                     deployment_type="staging",
-                    details={"message": str(exc)},
+                    details={"message": str(exc), "namespace": namespace},
                 )
             )
             db.commit()
@@ -148,7 +151,7 @@ def _bg_deploy_staging(project_id: int):
         if project:
             failure_analysis = analyze_deployment_failure(
                 sanitize_name(project.repository_name or "app"),
-                settings.k8s_namespace,
+                namespace,
                 msg,
             )
             project.status = "staging_failed"
@@ -159,7 +162,7 @@ def _bg_deploy_staging(project_id: int):
                     version="blue",
                     status="failed",
                     deployment_type="staging",
-                    details={"error": msg, "failure_analysis": failure_analysis},
+                    details={"error": msg, "namespace": namespace, "failure_analysis": failure_analysis},
                 )
             )
             db.commit()
@@ -253,7 +256,8 @@ def deploy_staging(project_id: int, background_tasks: BackgroundTasks, db: Sessi
     project.status = "deploying"
     db.commit()
 
-    background_tasks.add_task(_bg_deploy_staging, project_id)
+    namespace = staging_namespace(settings.k8s_namespace, project_id, uuid4().hex[:8])
+    background_tasks.add_task(_bg_deploy_staging, project_id, namespace)
     return {"status": "deploying", "message": "Staging deployment started in background"}
 
 
@@ -377,7 +381,18 @@ def list_deployments(project_id: int, db: Session = Depends(get_db)):
 async def preview_app(project_id: int, request: Request, subpath: str = "", db: Session = Depends(get_db)):
     project = _get_project(project_id, db)
     app_name = sanitize_name(project.repository_name or "app")
-    namespace = settings.k8s_namespace
+    latest_healthy_staging = (
+        db.query(Deployment)
+        .filter(
+            Deployment.project_id == project_id,
+            Deployment.deployment_type == "staging",
+            Deployment.status == "healthy",
+        )
+        .order_by(Deployment.created_at.desc())
+        .first()
+    )
+    details = (latest_healthy_staging.details or {}) if latest_healthy_staging else {}
+    namespace = details.get("namespace") or settings.k8s_namespace
     preview_prefix = f"/api/projects/{project_id}/preview"
 
     try:
