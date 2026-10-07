@@ -67,6 +67,33 @@ GitHub Repo -> Analysis -> RAG Q&A -> AI Testing -> Docker Build -> Kubernetes D
 ## Documentation References
 
 - [System Architecture](docs/ARCHITECTURE.md): Detailed component breakdown, RAG pipeline, and schemas.
+- [AI & RAG Pipeline](docs/AI_PIPELINE.md): Embedding strategy, retrieval mechanism, and evaluation protocol.
+- [Prompt Engineering](docs/PROMPT_ENGINEERING.md): Design decisions behind each LLM prompt.
+- [Course Alignment](docs/COURSE_ALIGNMENT.md): AI DevOps concept coverage mapped to implementation files.
+- [Future Roadmap](docs/FUTURE_ROADMAP.md): Phase-by-phase extension plan.
+
+## Benchmark Results
+
+Results produced by `python backend/run_evaluation.py` against the standard sample FastAPI repository.
+
+| Mode | Correct / Total | Retrieval Accuracy | Answer Quality |
+|------|----------------|-------------------|----------------|
+| Heuristic (no LLM) | 4 / 5 | 80.0% | Single-line keyword answers |
+| Groq Llama-3.3-70b + RAG | 4 / 5 | 80.0% | Narrative answers with citations |
+
+> **Note on the tied accuracy score:** Both modes score 80% on the 5 factual eval questions because the heuristic
+> is tuned for exactly these fields (framework, language, port, entrypoint). The qualitative gap is visible in the
+> *answer quality* column — the LLM produces grounded, citation-backed narrative answers vs. one-line keyword responses.
+> For open-ended questions (e.g., "Explain the authentication flow"), the LLM significantly outperforms heuristic.
+
+**Evaluation metric:** Substring match between expected label and (answer + source path) text.
+Suitable for factual fields; paraphrase-blind by design. See [`docs/PROMPT_ENGINEERING.md`](docs/PROMPT_ENGINEERING.md) for details.
+
+To reproduce:
+```bash
+python backend/run_evaluation.py                          # quantitative results
+python -m pytest backend/tests/test_repository_ai.py -v  # 15 unit + integration tests
+```
 
 ## Architecture Notes
 

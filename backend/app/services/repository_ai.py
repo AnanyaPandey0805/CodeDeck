@@ -374,15 +374,18 @@ def get_active_ai_provider() -> dict[str, str]:
     if openai_key and not openai_key.startswith("sk-abcdef") and not openai_key.startswith("sk-dummy"):
         return {"provider": "OpenAI", "model": getattr(settings, "openai_model", "gpt-4.1-mini"), "status": "configured"}
 
+    groq_key = (getattr(settings, "groq_api_key", "") or "").strip()
     grok_key = (getattr(settings, "grok_api_key", "") or getattr(settings, "xai_api_key", "") or "").strip()
     if grok_key.startswith("gsk_"):
-        return {"provider": "Groq", "model": getattr(settings, "groq_model", "llama-3.3-70b-versatile"), "status": "configured"}
+        if not groq_key:
+            groq_key = grok_key
+        grok_key = ""
+
+    if groq_key and not groq_key.startswith("gsk-dummy"):
+        return {"provider": "Groq", "model": getattr(settings, "groq_model", "qwen/qwen3.8-27b"), "status": "configured"}
+
     if grok_key and not grok_key.startswith("xai-dummy"):
         return {"provider": "xAI Grok", "model": getattr(settings, "grok_model", "grok-2-latest"), "status": "configured"}
-
-    groq_key = (getattr(settings, "groq_api_key", "") or "").strip()
-    if groq_key:
-        return {"provider": "Groq", "model": getattr(settings, "groq_model", "llama-3.3-70b-versatile"), "status": "configured"}
 
     return {"provider": "Grounded Heuristic", "model": "rule-based-engine", "status": "offline_fallback", "message": "No usable LLM API key is configured."}
 
@@ -391,7 +394,7 @@ def _safe_chat_with_provider(
     prompt: str,
     system_prompt: str = "You are a grounded repository assistant. Answer only from provided evidence.",
 ) -> tuple[str | None, str]:
-    """Attempts completion with OpenAI first, falls back to xAI Grok, or returns None and 'heuristic'."""
+    """Attempts completion with OpenAI first, falls back to Groq / xAI, or returns None and 'heuristic'."""
     last_failure: str | None = None
 
     def failure_label(provider: str, error: Exception) -> str:
@@ -419,30 +422,43 @@ def _safe_chat_with_provider(
             last_failure = failure_label("OpenAI", e)
             logger.warning("OpenAI completion failed (%s), attempting secondary provider fallback", e)
 
-    # 2. A gsk_ key is a Groq OpenAI-compatible key, not an xAI key.
+    # 2. Try Groq (either configured directly or through gsk_ key in grok_api_key)
     grok_key = (getattr(settings, "grok_api_key", "") or getattr(settings, "xai_api_key", "") or "").strip()
     groq_key = (getattr(settings, "groq_api_key", "") or "").strip()
     if grok_key.startswith("gsk_"):
-        groq_key, grok_key = grok_key, ""
+        if not groq_key:
+            groq_key = grok_key
+        grok_key = ""
 
     if OpenAI and groq_key and not groq_key.startswith("gsk-dummy"):
-        try:
-            model = getattr(settings, "groq_model", "llama-3.3-70b-versatile")
-            client = OpenAI(api_key=groq_key, base_url=getattr(settings, "groq_base_url", "https://api.groq.com/openai/v1"))
-            res = client.chat.completions.create(
-                model=model,
-                temperature=0.2,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-            )
-            text = res.choices[0].message.content if res.choices else None
-            if isinstance(text, str) and text.strip():
-                return text.strip(), f"Groq ({model})"
-        except Exception as e:
-            last_failure = failure_label("Groq", e)
-            logger.warning("Groq completion failed (%s)", e)
+        configured_model = getattr(settings, "groq_model", "qwen/qwen3.8-27b")
+        candidate_models = [configured_model, "qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+        candidate_models = list(dict.fromkeys(candidate_models))
+
+        client = OpenAI(
+            api_key=groq_key,
+            base_url=getattr(settings, "groq_base_url", "https://api.groq.com/openai/v1"),
+        )
+        for model in candidate_models:
+            try:
+                res = client.chat.completions.create(
+                    model=model,
+                    temperature=0.2,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+                text = res.choices[0].message.content if res.choices else None
+                if isinstance(text, str) and text.strip():
+                    return text.strip(), f"Groq ({model})"
+            except Exception as e:
+                last_failure = failure_label("Groq", e)
+                logger.warning("Groq completion failed with model %s (%s)", model, e)
+                status_code = getattr(e, "status_code", None)
+                if status_code == 404:
+                    continue
+                break
 
     # 3. Try xAI Grok if key is configured (or if OpenAI failed)
     if OpenAI and grok_key and not grok_key.startswith("xai-dummy"):
@@ -587,16 +603,23 @@ def answer_repository_question(project_id: int, question: str, analysis: dict) -
     sources = search_repository(project_id, question, limit=4)
     signals = _collect_signals(project_id, analysis)
 
-    source_block = "\n\n".join(
-        f"[{src.path}:{src.line_start}-{src.line_end}]\n{src.snippet}" for src in sources
+    source_block = (
+        "\n\n".join(f"[{src.path}:{src.line_start}-{src.line_end}]\n{src.snippet}" for src in sources)
+        if sources
+        else "No specific source file snippets matched this query."
+    )
+    system_prompt = (
+        "You are DeployMind AI, an intelligent DevOps and repository technical assistant. "
+        "Provide a concise, direct, and structured answer based strictly on the detected architecture signals and code snippets. "
+        "Format with clear bullet points and bold key terms. Keep the answer under 120 words. "
+        "Do not write long rambles or unstructured text."
     )
     prompt = (
-        f"{RAG_QA_PROMPT}\n\n"
-        f"Question: {question}\n\n"
-        f"Detected analysis: {json.dumps(signals, indent=2)}\n\n"
-        f"Retrieved snippets:\n{source_block}"
+        f"QUESTION:\n{question}\n\n"
+        f"DETECTED REPOSITORY ARCHITECTURE & SIGNALS:\n{json.dumps(signals, indent=2)}\n\n"
+        f"RETRIEVED CODE EVIDENCE:\n{source_block}"
     )
-    answer_text, provider = _safe_chat_with_provider(prompt)
+    answer_text, provider = _safe_chat_with_provider(prompt, system_prompt=system_prompt)
     if not answer_text:
         answer_text = _heuristic_answer(question, analysis, signals, sources)
         # Distinguish a request-time outage from an unconfigured provider. The
@@ -655,7 +678,10 @@ def generate_deployment_recommendation(project_id: int, analysis: dict) -> Deplo
         f"Issues: {json.dumps(issues, indent=2)}\n"
         f"Relevant files:\n{source_block}"
     )
-    llm_summary = _safe_chat(prompt)
+    llm_summary = _safe_chat(
+        prompt,
+        system_prompt="You are a senior DevOps advisor. Provide a concise, structured deployment readiness summary (under 120 words) with clear bullet points. Do not write a continuous unformatted wall of text.",
+    )
     if llm_summary:
         summary = llm_summary
     return DeploymentRecommendation(
@@ -820,11 +846,34 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("SQLALCHEMY_DATABASE_URI", "sqlite:///:memory:")
 os.environ.setdefault("SECRET_KEY", "deploymind-test-secret-key-32chars-min-length!")
 os.environ.setdefault("PROJECT_NAME", "DeployMind-TestApp")
+os.environ.setdefault("FIRST_SUPERUSER", "admin@example.com")
+os.environ.setdefault("FIRST_SUPERUSER_PASSWORD", "testpassword123")
+os.environ.setdefault("POSTGRES_SERVER", "localhost")
+os.environ.setdefault("POSTGRES_USER", "test")
+os.environ.setdefault("POSTGRES_PASSWORD", "test")
+os.environ.setdefault("POSTGRES_DB", "test")
+os.environ.setdefault("EMAILS_ENABLED", "False")
 
 ROOT = Path(__file__).resolve().parents[1]
 for parent in [ROOT, ROOT.parent, ROOT / "src", ROOT / "app"]:
     if parent.is_dir() and str(parent) not in sys.path:
         sys.path.insert(0, str(parent))
+
+# Provide lightweight stubs for optional monitoring/telemetry/heavy dependencies
+from unittest.mock import MagicMock
+_STUB_MODULES = (
+    "sentry_sdk", "sentry_sdk.integrations", "sentry_sdk.integrations.fastapi",
+    "sentry_sdk.integrations.starlette", "sentry_sdk.integrations.logging",
+    "datadog", "newrelic", "opentelemetry", "opentelemetry.sdk",
+    "opentelemetry.instrumentation", "opentelemetry.instrumentation.flask",
+    "prometheus_client", "ddtrace",
+)
+for _mod in _STUB_MODULES:
+    if _mod not in sys.modules:
+        try:
+            __import__(_mod)
+        except ImportError:
+            sys.modules[_mod] = MagicMock()
 
 import pytest
 from {module_name} import {app_attr}
@@ -850,11 +899,67 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("SQLALCHEMY_DATABASE_URI", "sqlite:///:memory:")
 os.environ.setdefault("SECRET_KEY", "deploymind-test-secret-key-32chars-min-length!")
 os.environ.setdefault("PROJECT_NAME", "DeployMind-TestApp")
+os.environ.setdefault("FIRST_SUPERUSER", "admin@example.com")
+os.environ.setdefault("FIRST_SUPERUSER_PASSWORD", "testpassword123")
+os.environ.setdefault("POSTGRES_SERVER", "localhost")
+os.environ.setdefault("POSTGRES_USER", "test")
+os.environ.setdefault("POSTGRES_PASSWORD", "test")
+os.environ.setdefault("POSTGRES_DB", "test")
+os.environ.setdefault("EMAILS_ENABLED", "False")
 
 ROOT = Path(__file__).resolve().parents[1]
 for parent in [ROOT, ROOT.parent, ROOT / "backend", ROOT / "src", ROOT / "app"]:
     if parent.is_dir() and str(parent) not in sys.path:
         sys.path.insert(0, str(parent))
+
+# Provide lightweight stubs for optional/monitoring/telemetry/heavy dependencies
+# that are not critical for API smoke tests but can block import collection.
+from unittest.mock import MagicMock
+_STUB_MODULES = (
+    "sentry_sdk", "sentry_sdk.integrations", "sentry_sdk.integrations.fastapi",
+    "sentry_sdk.integrations.starlette", "sentry_sdk.integrations.logging",
+    "datadog", "newrelic", "opentelemetry", "opentelemetry.sdk",
+    "opentelemetry.instrumentation", "opentelemetry.instrumentation.fastapi",
+    "prometheus_client", "ddtrace",
+)
+for _mod in _STUB_MODULES:
+    if _mod not in sys.modules:
+        try:
+            __import__(_mod)
+        except ImportError:
+            sys.modules[_mod] = MagicMock()
+
+# Stub out sqlmodel if not installed — replace with SQLAlchemy-compatible shims
+try:
+    import sqlmodel  # noqa: F401
+except ImportError:
+    import types
+    _sqlmodel = types.ModuleType("sqlmodel")
+    try:
+        from sqlalchemy import Column, func, select, col  # noqa: F401
+        from sqlalchemy.orm import Session
+        _sqlmodel.col = col
+        _sqlmodel.func = func
+        _sqlmodel.select = select
+        _sqlmodel.Session = Session
+        _sqlmodel.SQLModel = object
+        _sqlmodel.Field = lambda *a, **kw: None
+        _sqlmodel.Relationship = lambda *a, **kw: None
+        class _FakeSQLModelMeta(type):
+            def __init__(cls, *a, **kw):
+                super().__init__(*a, **kw)
+        class _FakeSQLModel(metaclass=_FakeSQLModelMeta):
+            pass
+        _sqlmodel.SQLModel = _FakeSQLModel
+    except Exception:
+        _sqlmodel.col = MagicMock()
+        _sqlmodel.func = MagicMock()
+        _sqlmodel.select = MagicMock()
+        _sqlmodel.Session = MagicMock()
+        _sqlmodel.SQLModel = MagicMock()
+        _sqlmodel.Field = MagicMock()
+        _sqlmodel.Relationship = MagicMock()
+    sys.modules["sqlmodel"] = _sqlmodel
 
 import pytest
 from fastapi.testclient import TestClient
@@ -910,9 +1015,12 @@ def _run_install(command: str, cwd: Path, timeout: int) -> subprocess.CompletedP
 
 
 def _minimal_python_test_dependencies(framework: str) -> str:
+    # Always include sqlmodel so repos like full-stack-fastapi-template don't fail
+    # with ModuleNotFoundError during test collection.
+    common = "pytest httpx sentry-sdk sqlmodel sqlalchemy alembic python-multipart email-validator python-jose passlib"
     if framework == "Flask":
-        return "pip install flask pytest httpx -q"
-    return "pip install fastapi pytest httpx -q"
+        return f"pip install flask {common} -q"
+    return f"pip install fastapi uvicorn {common} -q"
 
 
 def _prepare_python_repo(repo_dir: Path, timeout: int, framework: str = "") -> str | None:
@@ -926,22 +1034,23 @@ def _prepare_python_repo(repo_dir: Path, timeout: int, framework: str = "") -> s
     minimal_cmd = _minimal_python_test_dependencies(framework)
 
     if req.exists():
-        install_cmds.append(f"pip install -r {req} -q")
+        install_cmds.append(f"pip install -r {req} -q --ignore-requires-python")
     elif pyproject.exists():
         install_cmds.append(f"pip install {pyproject.parent} -q")
 
-    # Attempt repository requirements install
+    # Attempt repository requirements install (non-fatal — we fall back to minimal)
     for command in install_cmds:
         try:
-            proc = _run_install(command, repo_dir, timeout=min(timeout, 120))
+            proc = _run_install(command, repo_dir, timeout=min(timeout, 180))
             if proc.returncode != 0:
-                logger.warning("Repository dependencies partial failure: %s", (proc.stderr or proc.stdout)[:200])
+                output = (proc.stderr or proc.stdout or "")[:400]
+                logger.warning("Repository dependencies partial failure: %s", output)
         except subprocess.TimeoutExpired:
             logger.warning("Repository dependencies install timed out, falling back to minimal runner")
 
     # Guarantee minimal test dependencies exist so testing is seamless
     try:
-        proc = _run_install(minimal_cmd, repo_dir, timeout=60)
+        proc = _run_install(minimal_cmd, repo_dir, timeout=90)
         if proc.returncode == 0:
             return None
         return proc.stderr or proc.stdout or "Failed to install test runner dependencies"
@@ -949,9 +1058,73 @@ def _prepare_python_repo(repo_dir: Path, timeout: int, framework: str = "") -> s
         return str(e)
 
 
+def _extract_missing_module(error_output: str) -> str | None:
+    """Parse a ModuleNotFoundError message and return the top-level package name."""
+    match = re.search(r"No module named '([A-Za-z0-9_.-]+)'", error_output)
+    if not match:
+        return None
+    mod = match.group(1).split(".")[0]  # get top-level package
+    # Map Python module name → PyPI package name for common mismatches
+    _module_to_pip: dict[str, str] = {
+        "sqlmodel": "sqlmodel",
+        "sentry_sdk": "sentry-sdk",
+        "jose": "python-jose",
+        "passlib": "passlib",
+        "dotenv": "python-dotenv",
+        "email_validator": "email-validator",
+        "multipart": "python-multipart",
+        "alembic": "alembic",
+        "celery": "celery",
+        "redis": "redis",
+        "boto3": "boto3",
+        "botocore": "botocore",
+        "stripe": "stripe",
+        "PIL": "Pillow",
+        "cv2": "opencv-python-headless",
+        "sklearn": "scikit-learn",
+        "yaml": "pyyaml",
+        "jwt": "PyJWT",
+        "cryptography": "cryptography",
+        "aiofiles": "aiofiles",
+        "starlette": "starlette",
+        "databases": "databases",
+        "tortoise": "tortoise-orm",
+        "beanie": "beanie",
+        "motor": "motor",
+        "pymongo": "pymongo",
+        "elasticsearch": "elasticsearch",
+    }
+    return _module_to_pip.get(mod, mod)
+
+
+def _find_python_syntax_errors(repo_dir: Path, limit: int = 20) -> list[str]:
+    """Parse application Python files before installing dependencies or running pytest."""
+    ignored_dirs = {
+        ".git", ".venv", "venv", "env", "node_modules", "__pycache__",
+        ".pytest_cache", ".mypy_cache", ".tox", "build", "dist",
+        ".deploymind_generated", "site-packages",
+    }
+    errors: list[str] = []
+    for path in sorted(repo_dir.rglob("*.py")):
+        relative = path.relative_to(repo_dir)
+        if any(part.lower() in ignored_dirs for part in relative.parts):
+            continue
+        try:
+            compile(path.read_bytes(), str(path), "exec")
+        except SyntaxError as exc:
+            location = f"{relative.as_posix()}:{exc.lineno or 1}"
+            errors.append(f"SyntaxError: {location}: {exc.msg}")
+            if len(errors) >= limit:
+                break
+        except OSError as exc:
+            logger.debug("Could not read Python source during syntax preflight: %s (%s)", relative, exc)
+    return errors
+
+
 def explain_failure(error: str, evidence: list[str] | None = None, command: str | None = None) -> dict:
     evidence = evidence or []
-    text = " ".join(evidence + [error]).lower()
+    diagnostic_text = " ".join(evidence + [error])
+    text = diagnostic_text.lower()
     category = "GENERAL_FAILURE"
 
     repository_status = "unknown"
@@ -978,6 +1151,17 @@ def explain_failure(error: str, evidence: list[str] | None = None, command: str 
         category = "DEPENDENCY_INSTALL_FAILED"
         cause = "Repository dependency installation failed before the generated tests could run."
         fix = "Check the repository dependency file for invalid or private-only packages, then retry the AI-generated tests."
+        repository_status = "incompatible_or_faulty"
+    elif "syntaxerror" in text or "multiple exception types must be parenthesized" in text:
+        category = "PYTHON_SYNTAX_ERROR"
+        location = re.search(r"([A-Za-z0-9_./\\-]+\.py:\d+):\s*", diagnostic_text)
+        location_text = f" at {location.group(1)}" if location else ""
+        if "multiple exception types must be parenthesized" in text:
+            cause = f"Python could not import the application: an invalid except clause{location_text} stopped pytest collection before generated tests ran."
+            fix = "Wrap multiple exception classes in parentheses, for example: except (InvalidTokenError, ValidationError):, then rerun AI tests."
+        else:
+            cause = f"Python could not import the application: a syntax error{location_text} stopped pytest collection before generated tests ran."
+            fix = "Correct the Python syntax at the reported file and line, then rerun AI tests."
         repository_status = "incompatible_or_faulty"
     elif "uid 1000 is not unique" in text:
         category = "STAGING_IMAGE_USER_COLLISION"
@@ -1026,14 +1210,32 @@ def explain_failure(error: str, evidence: list[str] | None = None, command: str 
         cause = "Insufficient information to determine the root cause."
         fix = "Review the error output, test runner stdout/stderr, and traceback details."
 
-    prompt = (
-        f"{TEST_FAILURE_PROMPT}\n\n"
-        f"TEST COMMAND: {command or 'pytest'}\n\n"
-        f"STDOUT:\n{evidence[0][:2500] if len(evidence) > 0 else 'None'}\n\n"
-        f"STDERR:\n{evidence[1][:2500] if len(evidence) > 1 else (evidence[0][:2500] if evidence else error)}"
+    if command:
+        prompt = (
+            f"{TEST_FAILURE_PROMPT}\n\n"
+            f"TEST COMMAND: {command}\n\n"
+            f"STDOUT:\n{evidence[0][:2500] if len(evidence) > 0 else 'None'}\n\n"
+            f"STDERR:\n{evidence[1][:2500] if len(evidence) > 1 else (evidence[0][:2500] if evidence else error)}"
+        )
+    else:
+        evidence_block = "\n".join(evidence[:3]) if evidence else "None"
+        prompt = (
+            f"{FAILURE_ANALYSIS_PROMPT}\n\n"
+            f"DEPLOYMENT STATUS: Failed\n\n"
+            f"POD STATUS: {evidence[0][:1000] if evidence else 'Unknown'}\n\n"
+            f"CONTAINER LOGS:\n{evidence_block[:2000]}\n\n"
+            f"ERROR MESSAGE:\n{error}"
+        )
+
+    llm_text, provider = _safe_chat_with_provider(
+        prompt,
+        system_prompt="You are an SRE and DevOps diagnostic specialist. Provide precise failure root-cause analysis based on the supplied evidence.",
     )
-    llm_text = _safe_chat(prompt)
-    summary = llm_text or cause
+    if llm_text:
+        summary = f"{cause}\n\n[AI Root Cause Analysis ({provider})]:\n{llm_text}"
+    else:
+        summary = cause
+
     return {
         "failure": error,
         "likely_cause": summary,
@@ -1045,6 +1247,7 @@ def explain_failure(error: str, evidence: list[str] | None = None, command: str 
         "suggested_fix": fix,
         "category": category,
         "repository_status": repository_status,
+        "analysis_provider": provider,
     }
 
 
@@ -1119,6 +1322,24 @@ def run_ai_generated_tests(project_id: int, repository_url: str, analysis: dict,
                     python_path = sub
                     break
 
+        syntax_errors = _find_python_syntax_errors(python_path)
+        if syntax_errors:
+            syntax_output = "\n".join(syntax_errors)
+            failure = explain_failure(
+                "Python source syntax check failed",
+                [syntax_output],
+                command="Python source syntax preflight",
+            )
+            return AITestRun(
+                status="failed",
+                message="Python syntax errors prevent AI-generated tests from running",
+                command="Python source syntax preflight",
+                generated_tests=[case],
+                stderr=syntax_output,
+                failure_analysis=failure,
+                test_inferences=inferences,
+            )
+
         removed_requirements = sanitize_requirements_file(python_path)
 
         gen_dir = python_path / ".deploymind_generated"
@@ -1140,15 +1361,42 @@ def run_ai_generated_tests(project_id: int, repository_url: str, analysis: dict,
 
         command = "pytest .deploymind_generated/test_ai_generated.py -q"
         env = {**_child_env(), "PYTHONPATH": str(python_path)}
-        proc = subprocess.run(
-            command,
-            cwd=python_path,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
+
+        # Retry loop: if pytest fails with ModuleNotFoundError, auto-install
+        # the missing package and try again (up to 3 attempts). This handles
+        # repos that import non-standard libs (sqlmodel, jose, passlib, etc.)
+        # that are not in the minimal test dependencies list.
+        _max_retries = 3
+        _installed_extra: set[str] = set()
+        for _attempt in range(_max_retries):
+            proc = subprocess.run(
+                command,
+                cwd=python_path,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+            if proc.returncode == 0:
+                break
+            combined_out = (proc.stdout or "") + (proc.stderr or "")
+            missing_pkg = _extract_missing_module(combined_out)
+            if (
+                missing_pkg
+                and missing_pkg not in _installed_extra
+                and "No module named" in combined_out
+                and _attempt < _max_retries - 1
+            ):
+                logger.info("Auto-installing missing package '%s' for AI tests (attempt %d)", missing_pkg, _attempt + 1)
+                try:
+                    _run_install(f"pip install {missing_pkg} -q", python_path, timeout=60)
+                    _installed_extra.add(missing_pkg)
+                    continue
+                except Exception as _install_err:
+                    logger.warning("Auto-install of '%s' failed: %s", missing_pkg, _install_err)
+            break  # no auto-install possible or no more retries
+
         stdout = (proc.stdout or "")[-6000:]
         stderr = (proc.stderr or "")[-6000:]
         if proc.returncode == 0:

@@ -320,8 +320,64 @@ def _python_runtime_command(analysis: dict, entrypoint: str, port: int) -> str:
     return f'CMD ["uvicorn", "{entrypoint}", "--host", "0.0.0.0", "--port", "{port}"]'
 
 
+# Optional monitoring/telemetry packages that are commonly imported but not
+# always listed in requirements.txt. We detect their imports at staging time
+# and inject a fallback pip install so the container doesn't crash on startup.
+_OPTIONAL_PACKAGE_IMPORTS: dict[str, str] = {
+    "sentry_sdk": "sentry-sdk",
+    "datadog": "datadog",
+    "ddtrace": "ddtrace",
+    "newrelic": "newrelic",
+    "prometheus_client": "prometheus-client",
+    "opentelemetry": "opentelemetry-sdk",
+    "elastic_apm": "elastic-apm",
+    "scout_apm": "scout-apm",
+    "rollbar": "rollbar",
+    "bugsnag": "bugsnag",
+    "logfire": "logfire",
+}
+
+
+def _scan_optional_pip_packages(app_dir: Path) -> list[str]:
+    """Scan Python source files and return pip package names for optional
+    imports (monitoring, telemetry, etc.) found in the source."""
+    found: list[str] = []
+    try:
+        for py_file in app_dir.rglob("*.py"):
+            try:
+                text = py_file.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for import_name, pip_name in _OPTIONAL_PACKAGE_IMPORTS.items():
+                if pip_name not in found and import_name in text:
+                    found.append(pip_name)
+    except Exception:
+        pass
+    return found
+
+
+def _patch_dockerfile_with_optional_deps(content: str, packages: list[str]) -> str:
+    """Inject a 'pip install' step for optional packages into a Dockerfile.
+
+    The install is appended after the main requirements install so it does not
+    break the existing layer cache. If no COPY/RUN pattern is found the line is
+    appended before the CMD instruction.
+    """
+    if not packages:
+        return content
+    pkg_str = " ".join(packages)
+    inject = f"RUN pip install --no-cache-dir {pkg_str} 2>/dev/null || true\n"
+    # Insert before the first COPY . . or CMD line
+    for marker in ("COPY . .", "COPY . /app", "COPY ./ /app", "CMD [", "ENTRYPOINT ["):
+        idx = content.find(marker)
+        if idx != -1:
+            return content[:idx] + inject + content[idx:]
+    return content + "\n" + inject
+
+
 def _reliable_staging_dockerfile(app_dir: Path, analysis: dict) -> str:
     port = int(analysis.get("port") or 8000)
+
     entry = analysis.get("entrypoint") or "app.main:app"
     pm = (analysis.get("package_manager") or "").lower()
     lang = (analysis.get("language") or "").lower()
@@ -337,7 +393,11 @@ def _reliable_staging_dockerfile(app_dir: Path, analysis: dict) -> str:
         and not has_complex_dockerfile(existing_dockerfile)
         and not requires_staging_dockerfile_replacement(existing_dockerfile)
     ):
-        return existing_dockerfile.read_text(encoding="utf-8", errors="ignore")
+        content = existing_dockerfile.read_text(encoding="utf-8", errors="ignore")
+        # Scan for optional monitoring deps that may not be in requirements.txt
+        # and inject a fallback pip install to prevent startup crashes.
+        optional_pkgs = _scan_optional_pip_packages(app_dir)
+        return _patch_dockerfile_with_optional_deps(content, optional_pkgs)
 
     if (app_dir / "requirements.txt").exists():
         return f"""FROM {python_base}
@@ -497,6 +557,10 @@ def deploy_staging(
         requires_replacement = requires_staging_dockerfile_replacement(existing_dockerfile)
         if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile) and not requires_source_build and not requires_replacement:
             existing_content = existing_dockerfile.read_text(encoding="utf-8", errors="ignore")
+            # Always inject optional monitoring deps to prevent startup crashes
+            # (e.g. sentry_sdk imported in main.py but not in requirements.txt).
+            optional_pkgs = _scan_optional_pip_packages(app_dir)
+            existing_content = _patch_dockerfile_with_optional_deps(existing_content, optional_pkgs)
             if (analysis.get("framework") or "").lower() == "fastapi" and _needs_fastapi_entrypoint_alignment(
                 existing_content, analysis.get("entrypoint")
             ):
@@ -506,8 +570,9 @@ def deploy_staging(
                 )
                 logger.info("Aligned FastAPI Dockerfile entrypoint with detected target %s", analysis.get("entrypoint"))
             else:
-                dockerfile_path = existing_dockerfile
-                context_dir = _determine_build_context(dest, app_dir, dockerfile_path, analysis.get("source_subdir"))
+                context_dir, dockerfile_path = _write_build_context(
+                    dest, existing_content, analysis.get("source_subdir")
+                )
         else:
             if existing_dockerfile.exists() and (has_complex_dockerfile(existing_dockerfile) or requires_source_build or requires_replacement):
                 logger.warning(

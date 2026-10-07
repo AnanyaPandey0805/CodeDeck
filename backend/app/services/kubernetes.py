@@ -137,7 +137,7 @@ def wait_rollout(
         pod_proc = _run(
             ["kubectl", "get", "pods", "-n", namespace, "-l", f"app={deployment.removesuffix('-staging').removesuffix('-green').removesuffix('-blue')}",
              "-o", "jsonpath={range .items[*]}{.metadata.name}{'|'}{.status.containerStatuses[0].state.waiting.reason}{'|'}{.status.containerStatuses[0].state.terminated.reason}{'\\n'}{end}"],
-            timeout=15,
+            timeout=30,
         )
         pod_output = (pod_proc.stdout or "").strip()
         for line in pod_output.splitlines():
@@ -160,7 +160,7 @@ def wait_rollout(
         # Try the standard rollout status check
         proc = _run(
             ["kubectl", "rollout", "status", f"deployment/{deployment}", "-n", namespace, "--timeout=1s"],
-            timeout=15,
+            timeout=30,
         )
         if proc.returncode == 0:
             logger.info("rollout complete for %s", deployment)
@@ -265,7 +265,7 @@ def get_service_port(service: str, namespace: str) -> int:
         [
             "kubectl", "get", "svc", service, "-n", namespace,
             "-o", "jsonpath={.spec.ports[0].port}"
-        ], timeout=15
+        ], timeout=30
     )
     if proc.returncode == 0 and proc.stdout.strip().isdigit():
         return int(proc.stdout.strip())
@@ -577,7 +577,7 @@ def get_active_version(app_name: str, namespace: str) -> str:
             "-o",
             "jsonpath={{.spec.selector.version}}",
         ],
-        timeout=15,
+        timeout=30,
     )
     if proc.returncode == 0 and proc.stdout.strip():
         return proc.stdout.strip()

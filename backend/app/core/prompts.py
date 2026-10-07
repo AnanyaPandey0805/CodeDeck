@@ -85,31 +85,16 @@ DEPLOYMENT_RECOMMENDATION_PROMPT = """
 You are a DevOps advisor analysing a repository for deployment readiness.
 
 TASK:
-Produce a deployment recommendation based on the analysis signals below.
+Produce a concise, well-structured deployment summary based on the analysis signals below.
 
 ANALYSIS SIGNALS:
 {signals}
 
-INCLUDE:
-- Detected technology stack
-- Application entry point and port
-- Docker considerations (base image, multi-stage, health check)
-- Kubernetes considerations (resource limits, probes, replicas)
-- Health endpoint (if detected) or suggestion to add one
-- Database / external service dependencies
-- Likely deployment risks
-- Suggested deployment steps (ordered)
-
 CONSTRAINTS:
-- Base recommendations on the provided signals only.
-- Do NOT generate executable shell commands — provide guidance, not scripts.
-- Clearly flag any assumptions.
-- Keep the recommendation under 500 words.
-
-OUTPUT FORMAT (plain text, use headings):
-## Stack Summary
-## Deployment Steps
-## Risks & Considerations
+- Keep the summary structured, crisp, and under 150 words.
+- Use clear bullet points and bold key terms.
+- Cover: (1) Architecture & runtime summary, (2) Container & Kubernetes readiness, (3) Critical prerequisites (e.g. database, health checks).
+- Avoid rambling introductory filler or repeating entire command scripts.
 """.strip()
 
 # ─── 4. Test Generation ─────────────────────────────────────────────────────

@@ -88,6 +88,80 @@ function TerminalBlock({ text, maxH = '14rem' }: { text: string; maxH?: string }
   )
 }
 
+function renderInlineFormatting(str: string): React.ReactNode {
+  const parts = str.split(/(\*\*[^*]+\*\*|`[^`]+`)/g)
+  return parts.map((part, i) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={i} className="font-semibold text-zinc-100">{part.slice(2, -2)}</strong>
+    }
+    if (part.startsWith('`') && part.endsWith('`')) {
+      return (
+        <code key={i} className="rounded bg-zinc-800/80 px-1 py-0.5 font-mono text-[11px] text-sky-300 border border-zinc-700/50">
+          {part.slice(1, -1)}
+        </code>
+      )
+    }
+    return part
+  })
+}
+
+function FormattedText({ text, className = '' }: { text?: string | null; className?: string }) {
+  if (!text) return null
+  const lines = text.split('\n')
+  return (
+    <div className={`space-y-1.5 text-xs leading-relaxed ${className}`}>
+      {lines.map((line, idx) => {
+        const trimmed = line.trim()
+        if (!trimmed) return <div key={idx} className="h-0.5" />
+        if (trimmed.startsWith('### ')) {
+          return (
+            <h4 key={idx} className="text-[11px] font-semibold uppercase tracking-wider text-sky-400 mt-2">
+              {trimmed.replace(/^###\s+/, '')}
+            </h4>
+          )
+        }
+        if (trimmed.startsWith('## ')) {
+          return (
+            <h3 key={idx} className="text-xs font-bold uppercase tracking-wider text-sky-300 mt-2.5 border-b border-zinc-800/80 pb-1">
+              {trimmed.replace(/^##\s+/, '')}
+            </h3>
+          )
+        }
+        if (trimmed.startsWith('# ')) {
+          return (
+            <h2 key={idx} className="text-sm font-bold text-zinc-100 mt-2.5">
+              {trimmed.replace(/^#\s+/, '')}
+            </h2>
+          )
+        }
+        if (trimmed.startsWith('* ') || trimmed.startsWith('- ')) {
+          return (
+            <div key={idx} className="flex gap-2 items-start ml-1 text-zinc-300">
+              <span className="text-sky-400 font-bold shrink-0">•</span>
+              <span>{renderInlineFormatting(trimmed.replace(/^[*\-]\s+/, ''))}</span>
+            </div>
+          )
+        }
+        if (/^\d+\.\s+/.test(trimmed)) {
+          const num = trimmed.match(/^(\d+)\.\s+/)?.[1]
+          const content = trimmed.replace(/^\d+\.\s+/, '')
+          return (
+            <div key={idx} className="flex gap-2 items-start ml-1 text-zinc-300">
+              <span className="text-amber-400 font-mono font-semibold shrink-0">{num}.</span>
+              <span>{renderInlineFormatting(content)}</span>
+            </div>
+          )
+        }
+        return (
+          <p key={idx} className="text-zinc-200">
+            {renderInlineFormatting(line)}
+          </p>
+        )
+      })}
+    </div>
+  )
+}
+
 // ─── main App ───────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -693,7 +767,7 @@ export default function App() {
                               </span>
                             )}
                           </div>
-                          <p className="text-sm leading-relaxed text-zinc-200">{qaResult.answer}</p>
+                          <FormattedText text={qaResult.answer} />
                         </div>
                         {qaResult.sources.length > 0 && (
                           <div className="rounded border border-zinc-700 bg-zinc-900/60 p-4">
@@ -731,7 +805,7 @@ export default function App() {
                   {recommendation && (
                     <div className="rounded border border-zinc-700 bg-zinc-900/60 p-4 space-y-3">
                       <div className="text-[10px] uppercase tracking-widest text-zinc-600">Deployment Recommendation</div>
-                      <p className="text-sm text-zinc-200 leading-relaxed">{recommendation.summary}</p>
+                      <FormattedText text={recommendation.summary} />
                       {(recommendation.potential_issues ?? []).length > 0 && (
                         <div>
                           <div className="text-[10px] uppercase tracking-widest text-orange-500 mb-1">Potential Issues</div>
@@ -911,9 +985,9 @@ export default function App() {
                           <div className="space-y-2 text-xs">
                             <div>
                               <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">Likely Root Cause</div>
-                              <p className="text-red-200 leading-relaxed font-sans text-xs bg-red-950/40 p-2.5 rounded border border-red-900/30 whitespace-pre-line">
-                                {String(aiTests.failure_analysis.likely_cause ?? 'No analysis provided')}
-                              </p>
+                              <div className="bg-red-950/40 p-2.5 rounded border border-red-900/30">
+                                <FormattedText text={String(aiTests.failure_analysis.likely_cause ?? 'No analysis provided')} />
+                              </div>
                             </div>
                             {Boolean(aiTests.failure_analysis.suggested_fix) && (
                               <div>
@@ -1296,7 +1370,7 @@ export default function App() {
                           Repository incompatible or incomplete
                         </div>
                       )}
-                      <p className="text-orange-200">{String(failureAnalysis.likely_cause ?? 'No analysis')}</p>
+                      <FormattedText text={String(failureAnalysis.likely_cause ?? 'No analysis')} />
                       {Boolean(failureAnalysis.suggested_fix) && (
                         <p className="mt-2 text-orange-300/70">→ {String(failureAnalysis.suggested_fix)}</p>
                       )}
