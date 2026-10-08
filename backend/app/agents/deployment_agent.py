@@ -3,6 +3,7 @@ import re
 import shutil
 from pathlib import Path
 from typing import Callable
+from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, Field
 
@@ -216,6 +217,93 @@ def _collect_runtime_env(
             "SPRING_DATASOURCE_USERNAME": "deploymind",
             "SPRING_DATASOURCE_PASSWORD": "deploymind",
         })
+    elif database == "mongodb":
+        service = f"{app_name}-db"
+        existing_uri = next(
+            (
+                merged[key]
+                for key in (
+                    "SPRING_DATA_MONGODB_URI",
+                    "MONGODB_URI",
+                    "MONGO_URI",
+                    "MONGO_URL",
+                )
+                if merged.get(key, "").strip()
+            ),
+            "",
+        )
+        configured_database = ""
+        if not existing_uri:
+            # Preserve the repository's configured database name when its
+            # Mongo URI lives in Spring's application.properties/yml instead
+            # of an env file. Only the database name is reused; the local
+            # staging URI always points at the in-cluster service.
+            for config_file in sorted(app_dir.rglob("application.*")):
+                if config_file.suffix.lower() not in {".properties", ".yml", ".yaml"}:
+                    continue
+                try:
+                    config_text = config_file.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                flat_database = re.search(
+                    r"(?im)^\s*spring\.data\.mongodb\.database\s*[:=]\s*[\"']?([A-Za-z0-9_-]+)",
+                    config_text,
+                )
+                if flat_database:
+                    configured_database = flat_database.group(1)
+                config_lines = config_text.splitlines()
+                for index, line in enumerate(config_lines):
+                    section = re.match(r"^(\s*)mongodb\s*:\s*(?:#.*)?$", line, re.IGNORECASE)
+                    if not section:
+                        continue
+                    section_indent = len(section.group(1))
+                    for child_line in config_lines[index + 1:]:
+                        if child_line.strip() and len(child_line) - len(child_line.lstrip()) <= section_indent:
+                            break
+                        yaml_database = re.match(
+                            r"^\s+database\s*:\s*[\"']?([A-Za-z0-9_-]+)", child_line, re.IGNORECASE
+                        )
+                        if yaml_database:
+                            configured_database = yaml_database.group(1)
+                            break
+                uri_match = re.search(r"mongodb(?:\+srv)?://[^\s\"'<>]+", config_text, re.IGNORECASE)
+                if uri_match:
+                    existing_uri = uri_match.group(0).rstrip(",;})]")
+                    break
+        database_name = ""
+        if existing_uri:
+            try:
+                database_name = unquote(urlsplit(existing_uri).path.lstrip("/").split("/", 1)[0])
+            except ValueError:
+                database_name = ""
+        database_name = (
+            database_name
+            or merged.get("SPRING_DATA_MONGODB_DATABASE", "").strip()
+            or merged.get("MONGO_DATABASE", "").strip()
+            or merged.get("MONGODB_DATABASE", "").strip()
+            or configured_database
+            or "app"
+        )
+        database_name = database_name or "app"
+        mongo_uri = f"mongodb://{service}:27017/{database_name}"
+        merged.update({
+            # Spring Boot's URI takes precedence over localhost-based
+            # application.properties settings in the staged pod.
+            "SPRING_DATA_MONGODB_URI": mongo_uri,
+            "SPRING_DATA_MONGODB_HOST": service,
+            "SPRING_DATA_MONGODB_PORT": "27017",
+            "SPRING_DATA_MONGODB_DATABASE": database_name,
+            # Common names used by non-Spring Java and other app frameworks.
+            "MONGODB_URI": mongo_uri,
+            "MONGO_URI": mongo_uri,
+            "MONGO_URL": mongo_uri,
+            "MONGO_HOST": service,
+            "MONGODB_HOST": service,
+            "MONGO_PORT": "27017",
+            "MONGODB_PORT": "27017",
+            "MONGO_DATABASE": database_name,
+            "MONGODB_DATABASE": database_name,
+        })
     dependencies = set(staging_dependencies or [])
     if "redis" in dependencies:
         merged.update({"REDIS_HOST": f"{app_name}-redis", "REDIS_PORT": "6379"})
@@ -357,21 +445,34 @@ def _scan_optional_pip_packages(app_dir: Path) -> list[str]:
 
 
 def _patch_dockerfile_with_optional_deps(content: str, packages: list[str]) -> str:
-    """Inject a 'pip install' step for optional packages into a Dockerfile.
+    """Install detected runtime imports before the image drops root privileges.
 
-    The install is appended after the main requirements install so it does not
-    break the existing layer cache. If no COPY/RUN pattern is found the line is
-    appended before the CMD instruction.
+    These packages are only optional in the sense that many apps do not import
+    them. Once source code imports one unconditionally (for example,
+    ``import sentry_sdk``), it is a required runtime dependency. Do not hide a
+    failed install: a successful image build must not produce a container that
+    immediately crashes with ModuleNotFoundError.
     """
     if not packages:
         return content
     pkg_str = " ".join(packages)
-    inject = f"RUN pip install --no-cache-dir {pkg_str} 2>/dev/null || true\n"
-    # Insert before the first COPY . . or CMD line
-    for marker in ("COPY . .", "COPY . /app", "COPY ./ /app", "CMD [", "ENTRYPOINT ["):
+    inject = f"RUN pip install --no-cache-dir {pkg_str}\n"
+
+    # A typical Dockerfile switches to a non-root runtime user near its end.
+    # Install before that switch so pip has permission to write to site-packages.
+    lines = content.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.lstrip().upper().startswith("USER "):
+            lines.insert(index, inject)
+            return "".join(lines)
+
+    # Otherwise install after dependency manifests have been copied/installed,
+    # but before application source or startup instructions.
+    for marker in ("COPY . .", "COPY . /app", "COPY ./ /app", "CMD [", "ENTRYPOINT [", "CMD ", "ENTRYPOINT "):
         idx = content.find(marker)
         if idx != -1:
-            return content[:idx] + inject + content[idx:]
+            line_start = content.rfind("\n", 0, idx) + 1
+            return content[:line_start] + inject + content[line_start:]
     return content + "\n" + inject
 
 
@@ -582,6 +683,11 @@ def deploy_staging(
             # framework rules. Recreate them from the disposable clone so
             # Java/React/Python runtimes always use the current detection.
             staging_content = _reliable_staging_dockerfile(app_dir, analysis)
+            # A generated Dockerfile also needs imported monitoring packages
+            # that were omitted from the repository's dependency manifest.
+            staging_content = _patch_dockerfile_with_optional_deps(
+                staging_content, _scan_optional_pip_packages(app_dir)
+            )
             if (analysis.get("framework") or "").lower() == "fastapi":
                 staging_content = _align_fastapi_dockerfile_entrypoint(
                     staging_content, analysis.get("entrypoint")
@@ -766,6 +872,9 @@ def deploy_green(
         requires_replacement = requires_staging_dockerfile_replacement(existing_dockerfile)
         if existing_dockerfile.exists() and not has_complex_dockerfile(existing_dockerfile) and not requires_source_build and not requires_replacement:
             existing_content = existing_dockerfile.read_text(encoding="utf-8", errors="ignore")
+            existing_content = _patch_dockerfile_with_optional_deps(
+                existing_content, _scan_optional_pip_packages(app_dir)
+            )
             if (analysis.get("framework") or "").lower() == "fastapi" and _needs_fastapi_entrypoint_alignment(
                 existing_content, analysis.get("entrypoint")
             ):
@@ -783,6 +892,9 @@ def deploy_green(
                     "Repo Dockerfile requires a source-build-compatible replacement for production build."
                 )
             staging_content = _reliable_staging_dockerfile(app_dir, analysis)
+            staging_content = _patch_dockerfile_with_optional_deps(
+                staging_content, _scan_optional_pip_packages(app_dir)
+            )
             if (analysis.get("framework") or "").lower() == "fastapi":
                 staging_content = _align_fastapi_dockerfile_entrypoint(
                     staging_content, analysis.get("entrypoint")

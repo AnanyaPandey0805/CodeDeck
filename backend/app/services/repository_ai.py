@@ -1181,6 +1181,14 @@ def explain_failure(error: str, evidence: list[str] | None = None, command: str 
         category = "IMAGE_PULL_FAILED"
         cause = "Kubernetes could not start the image that was built or loaded."
         fix = "Verify the Docker build succeeded and that the image was loaded into the kind cluster."
+    elif (
+        ("mongodb" in text or "mongo" in text)
+        and ("connection refused" in text or "mongosocketopenexception" in text)
+    ):
+        category = "DATABASE_UNAVAILABLE"
+        cause = "The application cannot connect to MongoDB. In a Kubernetes Pod, localhost points to the application Pod itself, not a separate MongoDB Pod."
+        fix = "For staging, provision MongoDB in the same namespace and set SPRING_DATA_MONGODB_URI (or the app's Mongo URI setting) to the MongoDB Service address, not localhost."
+        repository_status = "staging_configuration_issue"
     elif "port-forward exited early" in text or "connection refused" in text:
         category = "PORT_FORWARD_OR_REFUSED"
         cause = "The service became reachable before the application was actually ready, or the wrong port is exposed."

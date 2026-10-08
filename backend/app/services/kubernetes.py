@@ -468,11 +468,35 @@ def patch_manifests_for_local(
                     # Inject / merge environment variables
                     if env_vars:
                         existing_env = container.get("env") or []
-                        env_map = {item["name"]: item.get("value", "") for item in existing_env if "name" in item}
+                        env_map = {
+                            item["name"]: dict(item)
+                            for item in existing_env
+                            if isinstance(item, dict) and "name" in item
+                        }
+                        # A repository manifest may explicitly set Spring's
+                        # Mongo URI to localhost. In a Pod, localhost refers
+                        # to that Pod, so staging must replace it with the
+                        # namespace-local Mongo Service address.
+                        mongo_env_keys = {
+                            "SPRING_DATA_MONGODB_URI",
+                            "SPRING_DATA_MONGODB_HOST",
+                            "SPRING_DATA_MONGODB_PORT",
+                            "SPRING_DATA_MONGODB_DATABASE",
+                            "MONGODB_URI",
+                            "MONGO_URI",
+                            "MONGO_URL",
+                            "MONGO_HOST",
+                            "MONGODB_HOST",
+                            "MONGO_PORT",
+                            "MONGODB_PORT",
+                            "MONGO_DATABASE",
+                            "MONGODB_DATABASE",
+                        }
+                        force_mongo_service = "SPRING_DATA_MONGODB_URI" in env_vars
                         for k, v in env_vars.items():
-                            if k not in env_map:
-                                env_map[k] = str(v)
-                        container["env"] = [{"name": k, "value": str(v)} for k, v in env_map.items()]
+                            if k not in env_map or (force_mongo_service and k in mongo_env_keys):
+                                env_map[k] = {"name": k, "value": str(v)}
+                        container["env"] = list(env_map.values())
 
                     # Determine numeric port for TCP probes (named ports are not always resolvable)
                     container_ports = container.get("ports", [])

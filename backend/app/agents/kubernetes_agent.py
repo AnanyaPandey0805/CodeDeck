@@ -49,6 +49,13 @@ def generate_database_manifest(app_name: str, database: str | None) -> str | Non
             - name: MYSQL_ROOT_PASSWORD
               value: deploymind-root"""
         port = 3306
+    elif database == "mongodb":
+        # Local staging only: keep MongoDB private to the Kubernetes namespace.
+        # The URI injected into the application uses the same app-db Service.
+        image = "mongo:7.0"
+        env = """            - name: MONGO_INITDB_DATABASE
+              value: app"""
+        port = 27017
     else:
         return None
 

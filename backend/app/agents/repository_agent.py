@@ -91,6 +91,8 @@ def _detect_database(blob: str) -> str | None:
     blob = blob.lower()
     if "postgis" in blob or "hibernate-spatial" in blob:
         return "postgis"
+    if any(marker in blob for marker in ("mongodb", "mongo:", "spring.data.mongodb", "spring-boot-starter-data-mongodb", "mongoclient")):
+        return "mongodb"
     if any(marker in blob for marker in ("postgresql", "postgres", "psycopg", "asyncpg")):
         return "postgresql"
     if any(marker in blob for marker in ("mysql", "mariadb", "pymysql", "mysqlclient")):
